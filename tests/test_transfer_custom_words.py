@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.application.history import DownloadHistorySnapshot
-from app.chain.transfer import TransferChain
+from app.chain.transfer import TransferChain  # pylint: disable=no-name-in-module
 from app.chain.transfer import records as mixins_module
 from app.chain.transfer.request import _TransferCandidatePlanner
 from app.domain.metainfo import MetaInfo

@@ -43,6 +43,10 @@ from app.schemas.workflow import FileItem
 
 from .request import _TransferCandidatePlanner
 
+type _BuildFileMeta = Callable[
+    [Path, Optional[List[str]], Optional[DownloadHistorySnapshot]], Optional[MetaBase]
+]
+
 
 class TransferWorkflowOwner(_TransferOwnerBase):
     """协调请求级候选构建并委托规划、执行与结算 owner。"""
@@ -521,12 +525,6 @@ class TransferWorkflowOwner(_TransferOwnerBase):
 
 
 
-
-
-
-
-
-
         candidate_planner = _TransferCandidatePlanner(
             self,
             meta=meta,
@@ -655,10 +653,7 @@ class TransferWorkflowOwner(_TransferOwnerBase):
             *,
             file_items: List[Tuple[FileItem, bool]],
             inherited_meta_map: Dict[Tuple[str, str], MetaBase],
-            build_file_meta: Callable[
-                [Path, Optional[List[str]], Optional[DownloadHistorySnapshot]],
-                Optional[MetaBase],
-            ],
+            build_file_meta: _BuildFileMeta,
             meta: Optional[MetaBase],
             mediainfo: Optional[Union[MediaInfo, MusicInfo]],
             media_source: Optional[MediaSource],
@@ -812,8 +807,7 @@ class TransferWorkflowOwner(_TransferOwnerBase):
                         file_meta = deepcopy(inherited_meta)
                     else:
                         file_meta = _build_file_meta(
-                            file_path,
-                            self._get_subscribe_custom_words(download_history),
+                            file_path, self._get_subscribe_custom_words(download_history),
                             download_history,
                         )
                 else:

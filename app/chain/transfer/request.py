@@ -365,9 +365,7 @@ class _TransferCandidatePlanner:
                 main_download_history
             )
             main_meta = self._build_file_meta(
-                main_path,
-                custom_word_list=subscribe_custom_words,
-                history_record=main_download_history,
+                main_path, subscribe_custom_words, main_download_history,
             )
             if not main_meta:
                 continue
