@@ -16,7 +16,7 @@ from app.domain.context import (
     MusicInfo,
     TorrentInfo,
 )
-from app.domain.meta.metabase import MetaBase
+from app.domain.meta.metabase import MetaBase, MetaInfoSnapshot
 from app.domain.metainfo import MetaInfo
 from app.schemas.media import resolve_media_identity
 from app.schemas.types import (
@@ -35,10 +35,15 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
             source: Optional[str],
             media: MediaInfo | MusicInfo,
             meta: MetaBase,
+            media_file_count: int = 0,
     ) -> dict[str, Any]:
-        """构造下载历史备注，并为音乐保存可恢复的版本化上下文。"""
+        """构造下载历史备注，并保存整理阶段可恢复的版本化上下文。"""
         note: dict[str, Any] = {"source": source}
         if getattr(media, "type", None) != MediaType.MUSIC:
+            meta_payload = MetaInfoSnapshot.from_meta(meta).to_dict()
+            meta_payload["apply_words"] = list(meta_payload["apply_words"])
+            note["meta_info"] = meta_payload
+            note["media_file_count"] = media_file_count
             return note
         media_payload = media.to_dict()
         media_payload.pop("raw_data", None)
@@ -80,6 +85,24 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
             download_path = download_dir / Path(file_list[0]).stem if file_list else download_dir
         save_path = download_dir if layout == "NoSubfolder" or not folder_name else download_path
         media_source, media_id = resolve_media_identity(media=media)
+        files_to_add: list[DownloadFileWrite] = []
+        for file in file_list:
+            if episodes:
+                file_meta = MetaInfo(Path(file).stem)
+                if not file_meta.begin_episode or file_meta.begin_episode not in episodes:
+                    continue
+            if not Path(file).suffix or Path(file).suffix.lower() not in self.runtime_config.media_extensions:
+                continue
+            files_to_add.append(
+                DownloadFileWrite(
+                    download_hash=download_hash,
+                    downloader=downloader,
+                    fullpath=(save_path / file).as_posix(),
+                    savepath=save_path.as_posix(),
+                    filepath=file,
+                    torrentname=meta.org_string,
+                )
+            )
         history = DownloadHistoryWrite(
             path=download_path.as_posix(),
             type=media.type.value,
@@ -103,27 +126,14 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
             date=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             media_category=media.category,
             episode_group=media.episode_group,
-            note=self._build_download_note(source, media, meta),
+            note=self._build_download_note(
+                source,
+                media,
+                meta,
+                media_file_count=len(files_to_add),
+            ),
             custom_words=custom_words,
         )
-        files_to_add: list[DownloadFileWrite] = []
-        for file in file_list:
-            if episodes:
-                file_meta = MetaInfo(Path(file).stem)
-                if not file_meta.begin_episode or file_meta.begin_episode not in episodes:
-                    continue
-            if not Path(file).suffix or Path(file).suffix.lower() not in self.runtime_config.media_extensions:
-                continue
-            files_to_add.append(
-                DownloadFileWrite(
-                    download_hash=download_hash,
-                    downloader=downloader,
-                    fullpath=(save_path / file).as_posix(),
-                    savepath=save_path.as_posix(),
-                    filepath=file,
-                    torrentname=meta.org_string,
-                )
-            )
         frozen_files = tuple(files_to_add)
         event_payload = {
             "hash": download_hash, "context": context, "username": username,

@@ -1,5 +1,7 @@
 """整理记录匹配、文件键与手动历史辅助能力。"""
 
+import re
+from dataclasses import fields
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -23,6 +25,7 @@ from app.domain.context import MediaInfo, MusicInfo
 from app.domain.meta.metabase import MetaBase
 from app.foundation import text as text_tools
 from app.schemas.types import (
+    MediaSource,
     MediaType,
 )
 from app.schemas.workflow import FileItem
@@ -207,6 +210,112 @@ class HistoryMatchMixin(_TransferOwnerBase):
                 media_type == MediaType.MOVIE
                 and str(file_year) != str(media_year)
         )
+
+    @staticmethod
+    def _history_numbers(value: Optional[str], prefix: str) -> List[int]:
+        """提取历史季集字段中的全部数字。"""
+        if not value:
+            return []
+        return [
+            int(number)
+            for number in re.findall(rf"{prefix}(\d+)", str(value), re.IGNORECASE)
+        ]
+
+    @classmethod
+    def _build_download_meta(
+            cls,
+            history_record: Optional[DownloadHistorySnapshot],
+    ) -> Optional[MetaBase]:
+        """从结构化快照或旧历史列恢复下载时已经确认的影视元数据。"""
+        if not history_record or history_record.type == MediaType.MUSIC.value:
+            return None
+        title = history_record.torrent_name or history_record.title
+        download_meta = MetaBase(
+            title=title,
+            subtitle=history_record.torrent_description,
+        )
+
+        note = history_record.note
+        snapshot = note.get("meta_info") if isinstance(note, dict) else None
+        if isinstance(snapshot, dict):
+            for meta_field in fields(MetaBase):
+                field_name = meta_field.name
+                if field_name not in snapshot:
+                    continue
+                value = snapshot.get(field_name)
+                try:
+                    if field_name == "type" and value:
+                        value = MediaType(value)
+                    elif field_name == "media_source" and value:
+                        value = MediaSource(value)
+                except (TypeError, ValueError):
+                    continue
+                setattr(download_meta, field_name, value)
+
+        try:
+            download_meta.type = MediaType(history_record.type)
+        except (TypeError, ValueError):
+            pass
+        if history_record.title:
+            download_meta.name = history_record.title
+        if history_record.year:
+            download_meta.year = history_record.year
+        if history_record.media_source and history_record.media_id:
+            download_meta.media_source = history_record.media_source
+            download_meta.media_id = history_record.media_id
+        if history_record.episode_group:
+            download_meta.episode_group = history_record.episode_group
+
+        seasons = cls._history_numbers(history_record.seasons, "S")
+        if len(set(seasons)) == 1:
+            download_meta.begin_season = seasons[0]
+            download_meta.end_season = None
+            download_meta.total_season = 1
+        elif seasons:
+            download_meta.begin_season = None
+            download_meta.end_season = None
+            download_meta.total_season = 0
+
+        episodes = cls._history_numbers(history_record.episodes, "E")
+        media_file_count = note.get("media_file_count") \
+            if isinstance(note, dict) else None
+        if len(set(episodes)) == 1:
+            download_meta.begin_episode = episodes[0]
+            download_meta.end_episode = None
+            download_meta.total_episode = 1
+        elif episodes and media_file_count == 1:
+            download_meta.begin_episode = min(episodes)
+            download_meta.end_episode = max(episodes)
+            download_meta.total_episode = (
+                download_meta.end_episode - download_meta.begin_episode + 1
+            )
+        elif episodes:
+            download_meta.begin_episode = None
+            download_meta.end_episode = None
+            download_meta.total_episode = 0
+        return download_meta
+
+    @classmethod
+    def _merge_download_meta(
+            cls,
+            file_meta: Optional[MetaBase],
+            history_record: Optional[DownloadHistorySnapshot],
+    ) -> Optional[MetaBase]:
+        """以下载时影视元数据为主，并用实际文件元数据补齐缺失字段。"""
+        if file_meta and file_meta.type == MediaType.MUSIC:
+            return file_meta
+        if (
+                file_meta
+                and history_record
+                and cls._is_movie_year_conflict(file_meta, history_record)
+        ):
+            return file_meta
+        download_meta = cls._build_download_meta(history_record)
+        if not download_meta:
+            return file_meta
+        if file_meta:
+            download_meta.merge(file_meta)
+        return download_meta
 
     @staticmethod
     def _optional_attr_equal(

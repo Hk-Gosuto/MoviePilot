@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         _is_hidden_or_recycle_path: Callable[..., Any]
         _is_media_file: Callable[..., Any]
         _is_movie_year_conflict: Callable[..., Any]
+        _merge_download_meta: Callable[..., Any]
         _is_music_lyrics_file: Callable[..., Any]
         _is_music_retry_source: Callable[..., Any]
         _is_overwrite_declined: Callable[..., Any]

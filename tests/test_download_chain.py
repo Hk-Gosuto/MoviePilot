@@ -278,7 +278,7 @@ def test_download_single_supplements_category_before_download_event(monkeypatch)
 
 
 def test_download_single_persists_custom_words_snapshot(monkeypatch):
-    """下载成功登记历史时，应把传入的订阅识别词原样存入快照，供整理时原样复现识别。"""
+    """下载成功登记历史时，应保存识别词和结构化元数据供整理复用。"""
     captured = {}
 
     class _CapturingDownloadHistoryOper:
@@ -294,7 +294,13 @@ def test_download_single_persists_custom_words_snapshot(monkeypatch):
         lambda _self: _download_dirs(),
     )
     monkeypatch.setattr(download_processing, "ThreadHelper", _FakeThreadHelper)
-    monkeypatch.setattr(download_submission, "TorrentHelper", _FakeTorrentHelper)
+    class _MediaTorrentHelper:
+        """返回一个视频和无关文件，用于验证媒体文件计数。"""
+
+        def get_fileinfo_from_torrent_content(self, _torrent_content):
+            return "", ["Demo.Show.S03E05.1080p.WEB-DL.x265.mkv", "README.txt"]
+
+    monkeypatch.setattr(download_submission, "TorrentHelper", _MediaTorrentHelper)
 
     chain = DownloadChain.__new__(DownloadChain)
     chain.download_history_repository = _CapturingDownloadHistoryOper()
@@ -306,7 +312,7 @@ def test_download_single_persists_custom_words_snapshot(monkeypatch):
     chain.post_message = MagicMock()
 
     context = Context(
-        meta_info=MetaInfo("Demo Show 2024"),
+        meta_info=MetaInfo("Demo Show S03E05 2024 1080p WEB-DL x265-GROUP"),
         media_info=MediaInfo(
             type=MediaType.TV,
             title="Demo Show",
@@ -337,6 +343,11 @@ def test_download_single_persists_custom_words_snapshot(monkeypatch):
     assert captured["custom_words"] == custom_words
     assert captured["poster"] == "https://images.example.com/w500/poster.jpg"
     assert captured["image"] == "https://images.example.com/w500/backdrop.jpg"
+    assert captured["note"]["media_file_count"] == 1
+    assert captured["note"]["meta_info"]["type"] == MediaType.TV.value
+    assert captured["note"]["meta_info"]["begin_season"] == 3
+    assert captured["note"]["meta_info"]["begin_episode"] == 5
+    assert captured["note"]["meta_info"]["resource_pix"] == "1080p"
 
 
 def test_save_subtitle_response_creates_missing_temp_directory(monkeypatch, tmp_path):

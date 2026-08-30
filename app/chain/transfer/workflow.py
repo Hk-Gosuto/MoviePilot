@@ -11,6 +11,7 @@ from app.application.configuration import get_configured_system_config
 from app.application.directory import DirectoryHelper
 from app.application.formatting import FormatParser
 from app.application.history import (
+    DownloadHistorySnapshot,
     describe_history_gate,
     evaluate_history_gate,
     is_skip_action,
@@ -539,6 +540,7 @@ class TransferWorkflowOwner(_TransferOwnerBase):
             download_hash=download_hash,
             sync_extra_files=bool(sync_extra_files),
             fileitem=fileitem,
+            manual=bool(manual),
         )
 
         try:
@@ -653,7 +655,10 @@ class TransferWorkflowOwner(_TransferOwnerBase):
             *,
             file_items: List[Tuple[FileItem, bool]],
             inherited_meta_map: Dict[Tuple[str, str], MetaBase],
-            build_file_meta: Callable[[Path, Optional[List[str]]], Optional[MetaBase]],
+            build_file_meta: Callable[
+                [Path, Optional[List[str]], Optional[DownloadHistorySnapshot]],
+                Optional[MetaBase],
+            ],
             meta: Optional[MetaBase],
             mediainfo: Optional[Union[MediaInfo, MusicInfo]],
             media_source: Optional[MediaSource],
@@ -809,9 +814,10 @@ class TransferWorkflowOwner(_TransferOwnerBase):
                         file_meta = _build_file_meta(
                             file_path,
                             self._get_subscribe_custom_words(download_history),
+                            download_history,
                         )
                 else:
-                    file_meta = _build_file_meta(file_path, None)
+                    file_meta = _build_file_meta(file_path, None, None)
 
                 if not file_meta:
                     all_success = False

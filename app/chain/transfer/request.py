@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from app.application.formatting import FormatParser
 from app.application.history import (
     DownloadHistoryQueryPort,
+    DownloadHistorySnapshot,
 )
 from app.chain.media import MediaChain
 from app.chain.storage import StorageChain
@@ -38,6 +39,7 @@ class _TransferCandidatePlanner:
             download_hash: Optional[str],
             sync_extra_files: bool,
             fileitem: FileItem,
+            manual: bool,
     ) -> None:
         """冻结候选规划依赖，避免请求阶段再读取可变配置。"""
         self._chain = chain
@@ -52,11 +54,13 @@ class _TransferCandidatePlanner:
         self._download_hash = download_hash
         self._sync_extra_files = sync_extra_files
         self._fileitem = fileitem
+        self._manual = manual
 
     def _build_file_meta(
             self,
             source_path: Path,
             custom_word_list: Optional[List[str]] = None,
+            history_record: Optional[DownloadHistorySnapshot] = None,
     ) -> Optional[MetaBase]:
         """
         构建整理任务使用的文件元数据，并应用手动季集/自定义格式覆盖。
@@ -69,6 +73,11 @@ class _TransferCandidatePlanner:
         if not self._meta:
             # _build_path_meta 已经应用过手动季集/自定义格式覆盖；
             # 这里避免再次偏移集数，导致手动整理的集数偏移翻倍。
+            if not self._manual:
+                return self._chain._merge_download_meta(
+                    built_meta,
+                    history_record,
+                )
             return built_meta
         return self._apply_meta_overrides(built_meta, source_path)
     def _has_reliable_video_source(self) -> bool:
@@ -161,6 +170,7 @@ class _TransferCandidatePlanner:
         return self._build_file_meta(
             main_path,
             custom_word_list=self._chain._get_subscribe_custom_words(main_download_history),
+            history_record=main_download_history,
         )
     def _append_item(
             self,
@@ -357,6 +367,7 @@ class _TransferCandidatePlanner:
             main_meta = self._build_file_meta(
                 main_path,
                 custom_word_list=subscribe_custom_words,
+                history_record=main_download_history,
             )
             if not main_meta:
                 continue
