@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from app.application.formatting import FormatParser
 from app.application.history import (
@@ -74,9 +74,9 @@ class _TransferCandidatePlanner:
             # _build_path_meta 已经应用过手动季集/自定义格式覆盖；
             # 这里避免再次偏移集数，导致手动整理的集数偏移翻倍。
             if not self._manual:
-                return self._chain._merge_download_meta(
-                    built_meta,
-                    history_record,
+                return cast(
+                    Optional[MetaBase],
+                    self._chain._merge_download_meta(built_meta, history_record),
                 )
             return built_meta
         return self._apply_meta_overrides(built_meta, source_path)

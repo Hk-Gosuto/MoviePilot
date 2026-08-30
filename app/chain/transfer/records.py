@@ -232,7 +232,7 @@ class HistoryMatchMixin(_TransferOwnerBase):
         title = history_record.torrent_name or history_record.title
         download_meta = MetaBase(
             title=title,
-            subtitle=history_record.torrent_description,
+            subtitle=history_record.torrent_description or "",
         )
 
         note = history_record.note
