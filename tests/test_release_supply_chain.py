@@ -440,27 +440,16 @@ def test_release_publishes_free_threaded_image_with_separate_metadata_and_cache(
     assert "scope=moviepilot-v3t-docker-arm64" in publish["with"]["cache-from"]
 
 
-def test_release_promotes_latest_only_after_both_versioned_images() -> None:
-    """只有两个版本制品都发布成功后才可移动 latest 标签。"""
+def test_release_publishes_latest_with_each_versioned_image() -> None:
+    """标准与 free-threaded 制品都应同时发布版本号和 latest 标签。"""
     workflow = _load_workflow()
     steps = workflow["jobs"]["Docker-build"]["steps"]
     names = [step.get("name") for step in steps]
     indexed = _steps_by_name(workflow)
 
-    assert "value=latest" not in indexed["Docker Meta"]["with"]["tags"]
-    assert "value=latest" not in indexed["Docker Meta free-threaded"]["with"]["tags"]
-    assert names.index("Publish multi-architecture image") < names.index("Promote latest image pair")
-    assert names.index("Publish free-threaded multi-architecture image") < names.index(
-        "Promote latest image pair"
-    )
-    promote = indexed["Promote latest image pair"]["run"]
-    assert "moviepilot-v3:latest" not in promote
-    assert 'ghcr_repository="${GITHUB_REPOSITORY,,}"' in promote
-    assert "ghcr.io/${GITHUB_REPOSITORY}" not in promote
-    assert "ghcr.io/${ghcr_repository}-v3" in promote
-    assert "ghcr.io/${ghcr_repository}-v3t" in promote
-    assert '"${image}:latest"' in promote
-    assert '"${image}:${app_version}"' in promote
+    assert "value=latest" in indexed["Docker Meta"]["with"]["tags"]
+    assert "value=latest" in indexed["Docker Meta free-threaded"]["with"]["tags"]
+    assert "Promote latest image pair" not in names
 
 
 def test_beta_applies_the_same_variant_scan_and_publish_contract() -> None:

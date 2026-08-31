@@ -138,21 +138,24 @@ def test_docker_entrypoint_does_not_sync_updater_as_a_special_case():
     assert 'source "${MP_CONTROL_DIR:-/usr/local/lib/moviepilot/control}/update.sh"' in content
 
 
-def test_v3_release_workflows_use_main_wiki_and_isolated_images():
-    """V3 正式版和 Beta 构建应读取主 Wiki 分支并保持镜像仓库隔离。"""
+def test_v3_release_workflows_use_main_wiki_and_canonical_images():
+    """V3 正式版和 Beta 构建应读取主 Wiki 分支并发布规范镜像名称。"""
     build_workflow = (ROOT_DIR / ".github" / "workflows" / "build-v3.yml").read_text(encoding="utf-8")
     beta_workflow = (ROOT_DIR / ".github" / "workflows" / "beta.yml").read_text(encoding="utf-8")
 
     assert "name: MoviePilot Builder v3" in build_workflow
     assert "      - v3" in build_workflow
     assert "          repository: jxxghp/MoviePilot-Wiki\n          ref: main" in build_workflow
-    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3" in build_workflow
-    assert "ghcr.io/${{ github.repository }}-v3" in build_workflow
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot\n" in build_workflow
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3\n" in build_workflow
+    assert "ghcr.io/${{ github.repository }}\n" in build_workflow
+    assert "ghcr.io/${{ github.repository }}-v3\n" not in build_workflow
     assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v2" not in build_workflow
-    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot\n" not in build_workflow
     assert "git tag -l 'v3.*'" in build_workflow
 
     assert "          repository: jxxghp/MoviePilot-Wiki\n          ref: main" in beta_workflow
-    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3" in beta_workflow
-    assert "ghcr.io/${{ github.repository }}-v3" in beta_workflow
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot\n" in beta_workflow
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3\n" not in beta_workflow
+    assert "ghcr.io/${{ github.repository }}\n" in beta_workflow
+    assert "ghcr.io/${{ github.repository }}-v3\n" not in beta_workflow
     assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v2" not in beta_workflow

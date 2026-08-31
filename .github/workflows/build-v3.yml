@@ -135,10 +135,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: |
+            ${{ secrets.DOCKER_USERNAME }}/moviepilot
             ${{ secrets.DOCKER_USERNAME }}/moviepilot-v3
-            ghcr.io/${{ github.repository }}-v3
+            ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ env.app_version }}
+            type=raw,value=latest
 
       - name: Docker Meta free-threaded
         id: meta_ft
@@ -149,6 +151,7 @@ jobs:
             ghcr.io/${{ github.repository }}-v3t
           tags: |
             type=raw,value=${{ env.app_version }}
+            type=raw,value=latest
 
       - name: Set Up QEMU
         uses: docker/setup-qemu-action@v4
@@ -360,26 +363,6 @@ jobs:
           cache-from: |
             type=gha,scope=moviepilot-v3t-docker-amd64,version=2
             type=gha,scope=moviepilot-v3t-docker-arm64,version=2
-
-      - name: Promote latest image pair
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        run: |
-          ghcr_repository="${GITHUB_REPOSITORY,,}"
-          for image in \
-            "${DOCKER_USERNAME}/moviepilot-v3" \
-            "ghcr.io/${ghcr_repository}-v3"; do
-            docker buildx imagetools create \
-              --tag "${image}:latest" \
-              "${image}:${app_version}"
-          done
-          for image in \
-            "${DOCKER_USERNAME}/moviepilot-v3t" \
-            "ghcr.io/${ghcr_repository}-v3t"; do
-            docker buildx imagetools create \
-              --tag "${image}:latest" \
-              "${image}:${app_version}"
-          done
 
       - name: Generate Changelog
         id: changelog

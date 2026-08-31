@@ -1,8 +1,8 @@
 {
   "application": {
-    "covered_lines": 12918,
-    "percent": 81.77,
-    "statements": 15798
+    "covered_lines": 12969,
+    "percent": 81.8,
+    "statements": 15854
   },
   "domain": {
     "covered_lines": 3695,
