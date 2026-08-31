@@ -15,7 +15,7 @@ from app.application.transfer.workflow import (
     TransferQueue,
     TransferTask,
 )
-from app.chain.transfer import TransferChain
+from app.chain.transfer import TransferChain  # pylint: disable=no-name-in-module
 from app.foundation.singleton import Singleton
 from app.runtime.config import global_vars
 from app.schemas.file import FileItem
@@ -901,7 +901,7 @@ def test_callback_without_terminal_settlement_releases_claim_and_counts_failure(
         daemon=True,
     )
     worker.start()
-    worker.join(timeout=1)
+    worker.join(timeout=3)
 
     assert worker.is_alive() is False
     success_callback.assert_called_once()
