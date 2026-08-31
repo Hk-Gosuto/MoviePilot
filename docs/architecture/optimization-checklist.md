@@ -101,7 +101,7 @@ ARCH-201 至 ARCH-204 均达到实现、验证、提交、推送和远端门禁�
 | Event Contract | 53 | 均已有 payload model，但当前全部是 diagnostic enforcement |
 | Python 源码量 | 305,884 行 | 排除 `app/plugins/**`；61 个文件超过 1,000 行，11 个超过 2,000 行 |
 | 长方法 | 290 个超过 80 行 | AST 统计排除 `app/plugins/**`；65 个超过 150 行，21 个超过 250 行 |
-| 全量 mypy 历史债务 | 9,986 / 591 文件 | canonical `SearchChain` Facade 已补齐显式类型转发；strict frontier 当前覆盖 41 个文件，低水位只允许继续下降 |
+| 全量 mypy 历史债务 | 9,983 / 591 文件 | canonical `SearchChain` Facade 已补齐显式类型转发；strict frontier 当前覆盖 41 个文件，低水位只允许继续下降 |
 | Ruff 历史诊断 | 630 | 低水位门禁通过，但规则集只覆盖 `E4/E7/E9/F/I` |
 | 覆盖率低水位 | Application 81.86%，Domain 81.23% | Chain、Runtime、Agent、Adapter、Startup 未进入包级覆盖率门禁 |
 
@@ -805,9 +805,11 @@ Pylint 10/10、Ruff、mypy/复杂度 ratchet、宿主与最新官方插件基线
 # 广泛变更的最终本地回归
 uv run --locked --no-sync python tests/run.py
 
-# 需要覆盖率证据时按 CI 串行生成真实报告，再检查低水位
-uv run --locked --no-sync python -m coverage erase
-uv run --locked --no-sync python -m coverage run tests/run.py --serial
+# 需要覆盖率证据时按 CI 的 8 个分片采集并合并，再检查低水位
+for shard in 1/8 2/8 3/8 4/8 5/8 6/8 7/8 8/8; do
+  uv run --locked --no-sync python -m coverage run --parallel-mode tests/run.py --shard "$shard"
+done
+uv run --locked --no-sync python -m coverage combine
 uv run --locked --no-sync python -m coverage json
 uv run --locked --no-sync python scripts/architecture/coverage_ratchet.py
 

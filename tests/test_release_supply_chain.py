@@ -440,16 +440,28 @@ def test_release_publishes_free_threaded_image_with_separate_metadata_and_cache(
     assert "scope=moviepilot-v3t-docker-arm64" in publish["with"]["cache-from"]
 
 
-def test_release_publishes_latest_with_each_versioned_image() -> None:
-    """标准与 free-threaded 制品都应同时发布版本号和 latest 标签。"""
+def test_release_publishes_version_and_latest_tags_for_both_image_variants() -> None:
+    """正式版元数据同时发布版本号与 latest，两个变体直接复用各自发布结果。"""
     workflow = _load_workflow()
     steps = workflow["jobs"]["Docker-build"]["steps"]
     names = [step.get("name") for step in steps]
     indexed = _steps_by_name(workflow)
 
-    assert "value=latest" in indexed["Docker Meta"]["with"]["tags"]
-    assert "value=latest" in indexed["Docker Meta free-threaded"]["with"]["tags"]
+    for name in ("Docker Meta", "Docker Meta free-threaded"):
+        tags = indexed[name]["with"]["tags"]
+        assert "type=raw,value=${{ env.app_version }}" in tags
+        assert "type=raw,value=latest" in tags
+
     assert "Promote latest image pair" not in names
+    assert names.index("Docker Meta") < names.index("Publish multi-architecture image")
+    assert names.index("Docker Meta free-threaded") < names.index(
+        "Publish free-threaded multi-architecture image"
+    )
+
+    standard_images = indexed["Docker Meta"]["with"]["images"]
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot" in standard_images
+    assert "${{ secrets.DOCKER_USERNAME }}/moviepilot-v3" in standard_images
+    assert "ghcr.io/${{ github.repository }}" in standard_images
 
 
 def test_beta_applies_the_same_variant_scan_and_publish_contract() -> None:
