@@ -5,6 +5,7 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +23,7 @@ from app.domain.meta.runtime import (
     get_metainfo_accelerator,
 )
 from app.domain.metainfo import MetaInfo, MetaInfoPath, find_metainfo
+from app.domain.tokens import Tokens
 from app.schemas.types import MediaSource, MediaType
 from tests.cases.meta import meta_cases
 
@@ -394,6 +396,85 @@ def test_python_metainfo_preserves_all_resource_types(title, expected):
     assert meta.resource_type == expected
     assert meta.edition.startswith(expected)
     assert expected in meta.resource_term
+
+
+def test_tokens_prev_and_cur_bracket_the_consumed_token():
+    """
+    主循环用 get_next() 先消费当前词元，因此 cur() 是后继、prev() 才是前驱。
+
+    词元流 ``a b c``：游标停在首位时没有前驱；消费一个词元后 cur() 指向下一个、
+    prev() 仍为空；再消费一个词元后 prev() 回到刚消费的那个词元。
+    """
+    tokens = Tokens("a b c")
+
+    assert tokens.cur() == "a"
+    assert tokens.prev() is None
+
+    assert tokens.get_next() == "a"
+    assert tokens.cur() == "b"
+    assert tokens.prev() is None
+
+    assert tokens.get_next() == "b"
+    assert tokens.cur() == "c"
+    assert tokens.prev() == "a"
+
+
+ZERO_TITLE_CASES = [
+    (
+        "Steins;Gate.0.S01E15.2018.1080p.BluRay.x265.10bit.FLAC.2.0.2Audio-ADE",
+        ("Steins Gate 0", "2018", 1, 15),
+    ),
+    (
+        "ID.0.S01E01.2017.1080p.BluRay.x265.10bit.FLAC.2.0-ADE",
+        ("Id 0", "2017", 1, 1),
+    ),
+    (
+        "Example.Show.0.S01E01",
+        ("Example Show 0", None, 1, 1),
+    ),
+    (
+        "Example.Show.0.2018.1080p.BluRay.x265-GROUP",
+        ("Example Show 0", "2018", None, None),
+    ),
+    (
+        "Example.Show.0",
+        ("Example Show", None, None, None),
+    ),
+    (
+        "Example.Show.0.1080p.BluRay.x265-GROUP",
+        ("Example Show", None, None, None),
+    ),
+    (
+        "Example.Movie.2.0.2021.1080p.BluRay.x265-GROUP",
+        ("Example Movie 2", "2021", None, None),
+    ),
+    (
+        "Example.Show.NCED.01",
+        ("Example Show Nced", None, None, 1),
+    ),
+]
+
+
+@pytest.mark.parametrize(("title", "expected"), ZERO_TITLE_CASES)
+def test_metainfo_and_python_fallback_keep_single_zero_sequel_title(title, expected):
+    """
+    片名结尾的单个 0 是续作编号，Rust 加速器与 Python 兜底必须给出相同结果。
+
+    只有词元恰为单个 0、前一个词元不是纯数字、后继是季、集或四位年份时才保留；
+    `01` 序号与 `2.0` 音轨分数仍按干扰词丢弃。
+    """
+    def _identity(meta):
+        return (
+            meta.en_name,
+            str(meta.year) if meta.year else None,
+            meta.begin_season,
+            meta.begin_episode,
+        )
+
+    assert _identity(MetaInfo(title)) == expected
+
+    with patch("app.adapters.system.rust.parse_metainfo", return_value=None):
+        assert _identity(MetaInfo(title)) == expected
 
 
 def test_metainfo_routes_audio_filename_to_music():
@@ -991,3 +1072,119 @@ def test_metainfopath_movie_collection_parent_does_not_override_file_title():
         meta = MetaInfoPath(Path(f"{collection}/{file_name}"))
         assert meta.name == expected_name
         assert meta.year == expected_year
+
+
+def _parse_meta_with_backend(title: str, subtitle: str, use_rust: bool) -> MetaBase:
+    """
+    按给定后端路径解析标题与副标题，校验 Rust 与 Python 回退的一致性。
+
+    :param title: 测试标题文本
+    :param subtitle: 测试副标题文本
+    :param use_rust: 为 False 时屏蔽 Rust 解析扩展以触发 Python 回退
+    :return: 解析得到的媒体元数据对象
+    """
+    if use_rust:
+        return MetaInfo(title=title, subtitle=subtitle)
+    with patch("app.adapters.system.rust.parse_metainfo", return_value=None):
+        return MetaInfo(title=title, subtitle=subtitle)
+
+
+@pytest.mark.parametrize("use_rust", [True, False])
+@pytest.mark.parametrize(
+    ("title", "subtitle", "expected_season", "expected_range"),
+    [
+        (
+            "The Angel Next Door Spoils Me Rotten S02 2026 1080p BluRay x265 10bit FLAC 2.0-ADE",
+            "关于邻家的天使大人不知不觉把我惯成了废人这档子事 第二季 / "
+            "お隣の天使様にいつの間にか駄目人間にされていた件 第2期 [01-12Fin] [简繁中日双语字幕]",
+            2,
+            (1, 12, 12),
+        ),
+        (
+            "Some Anime 2025 1080p WEB-DL",
+            "某个番剧 第2期 13-24Fin",
+            None,
+            (13, 24, 12),
+        ),
+    ],
+)
+def test_subtitle_period_with_fin_range_prefers_episode_range(
+    use_rust: bool,
+    title: str,
+    subtitle: str,
+    expected_season: Optional[int],
+    expected_range: tuple[int, int, int],
+) -> None:
+    """
+    副标题同时包含「第N期」与 Fin 完结集数范围时，集数范围应优先于期号（#7378）。
+
+    :param use_rust: 是否启用 Rust 快速解析入口
+    :param title: 测试标题文本
+    :param subtitle: 测试副标题文本
+    :param expected_season: 预期起始季号
+    :param expected_range: 预期起止与总集数三元组
+    """
+    meta = _parse_meta_with_backend(title, subtitle, use_rust)
+    begin_episode, end_episode, total_episode = expected_range
+
+    assert meta.type == MediaType.TV
+    assert meta.begin_season == expected_season
+    assert meta.begin_episode == begin_episode
+    assert meta.end_episode == end_episode
+    assert meta.total_episode == total_episode
+
+
+@pytest.mark.parametrize("use_rust", [True, False])
+def test_subtitle_period_with_japanese_kana_without_fin_clears_fake_episode(use_rust: bool) -> None:
+    """
+    包含日语假名的「第N期」在无 Fin 标记时应作为季号而非单集处理。
+
+    :param use_rust: 是否启用 Rust 快速解析入口
+    """
+    title = "The Angel Next Door Spoils Me Rotten S02 2026 1080p BluRay x265-ADE"
+    subtitle = "关于邻家的天使大人 第二季 / お隣の天使様にいつの間にか駄目人間にされていた件 第2期 [简繁字幕]"
+    meta = _parse_meta_with_backend(title, subtitle, use_rust)
+
+    assert meta.type == MediaType.TV
+    assert meta.begin_season == 2
+    assert meta.begin_episode is None
+    assert meta.end_episode is None
+    assert meta.total_episode == 0
+
+
+@pytest.mark.parametrize("use_rust", [True, False])
+def test_subtitle_variety_period_stays_episode(use_rust: bool) -> None:
+    """
+    中文综艺副标题中的「第N期」应继续保留为单集号，即使与季号数字相同也不误清。
+
+    :param use_rust: 是否启用 Rust 快速解析入口
+    """
+    cases = [
+        ("Singer 2024 1080p WEB-DL", "歌手 2024 第18期", None, 18),
+        ("Keep Running S02 2015 1080p WEB-DL", "奔跑吧 第二季 第2期", 2, 2),
+    ]
+    for title, subtitle, expected_season, expected_episode in cases:
+        meta = _parse_meta_with_backend(title, subtitle, use_rust)
+
+        assert meta.type == MediaType.TV
+        assert meta.begin_season == expected_season
+        assert meta.begin_episode == expected_episode
+        assert meta.end_episode is None
+        assert meta.total_episode == 1
+
+
+@pytest.mark.parametrize("use_rust", [True, False])
+def test_subtitle_period_does_not_override_explicit_title_episode(use_rust: bool) -> None:
+    """
+    主标题已显式声明单集集号时，副标题中的「第2期 [01-12Fin]」不得覆盖单集结果。
+
+    :param use_rust: 是否启用 Rust 快速解析入口
+    """
+    title = "The Angel Next Door Spoils Me Rotten S02E02 2026 1080p WEB-DL"
+    subtitle = "お隣の天使様にいつの間にか駄目人間にされていた件 第2期 [01-12Fin]"
+    meta = _parse_meta_with_backend(title, subtitle, use_rust)
+
+    assert meta.begin_season == 2
+    assert meta.begin_episode == 2
+    assert meta.end_episode is None
+    assert meta.total_episode == 1

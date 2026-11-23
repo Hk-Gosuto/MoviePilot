@@ -50,7 +50,10 @@ from app.chain.transfer.filter import (
     reset_network_filesystem_port,
 )
 from app.db.adapters.chain import TransactionalChainDurableEventWriter
-from app.db.adapters.download import TransactionalDownloadFailureRepository
+from app.db.adapters.download import (
+    TransactionalDownloadFailureRepository,
+    TransactionalDownloadPendingRepository,
+)
 from app.db.adapters.mediaserver import TransactionalMediaServerRepository
 from app.db.adapters.subscriptionactivity import TransactionalSubscriptionActivityRepository
 from app.db.adapters.transfer.admission import TransactionalTransferAdmissionRepository
@@ -137,6 +140,7 @@ def build_chain_runtime_context(
         transfer_execution_repository=dependencies.transfer_execution,
         media_server_repository=TransactionalMediaServerRepository(SessionFactory),
         download_failure_repository=TransactionalDownloadFailureRepository(SessionFactory),
+        download_pending_repository=TransactionalDownloadPendingRepository(SessionFactory),
         user_repository=build_transactional_user_repository(),
         classification_service=classification_service,
         legacy_transfer_command=execute_legacy_transfer_command,
@@ -202,7 +206,11 @@ def configure_module_runtime_provider() -> None:
     """
     在组合层登记惰性宿主模块运行时，不在此阶段实例化具体模块管理器。
     """
-    configure_module_runtime(lambda: cast(ModuleRuntime, ModuleManager()))
+    getter = getattr(ModuleManager, "get_existing_instance", None)
+    configure_module_runtime(
+        lambda: cast(ModuleRuntime, ModuleManager()),
+        existing=lambda: cast(ModuleRuntime | None, getter() if callable(getter) else None),
+    )
 
 
 def reset_chain_services() -> None:
