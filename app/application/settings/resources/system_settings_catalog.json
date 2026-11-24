@@ -767,7 +767,7 @@
       "source_file": "app/runtime/config.py"
     },
     "LLM_PROVIDER": {
-      "description": "LLM提供商（支持内置 provider，以及从 models.dev 动态补充的平台）",
+      "description": "LLM提供商（支持内置主流厂商及通用 OpenAI / Anthropic 兼容入口）",
       "group": "ai_agent",
       "source_file": "app/runtime/config.py"
     },
@@ -984,6 +984,11 @@
     "MUSIC_RENAME_FORMAT": {
       "description": "音乐重命名格式",
       "group": "transfer",
+      "source_file": "app/runtime/config.py"
+    },
+    "MUSIC_TRACK_MATCH": {
+      "description": "自动整理音乐专辑时的曲目对齐方式：strict 严格校验、fallback_ignore_duration 严格校验失败时回落忽略时长、ignore_duration 忽略时长校验",
+      "group": "music",
       "source_file": "app/runtime/config.py"
     },
     "NGINX_PORT": {

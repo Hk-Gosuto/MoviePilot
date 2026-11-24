@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from app.agent.llm.provider import (
@@ -33,9 +34,9 @@ def _isolate_provider_manager():
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
-def test_dynamic_provider_is_exposed_from_models_dev_cache() -> None:
+def test_models_dev_catalog_does_not_expand_unlisted_providers() -> None:
     """
-    模型目录缓存中的动态提供方可转换为公开定义。
+    models.dev 目录仅提供模型元数据，不再向提供商列表动态扩充未内置平台。
     """
     manager = LLMProviderManager()
     manager._models_dev_data = {
@@ -49,152 +50,301 @@ def test_dynamic_provider_is_exposed_from_models_dev_cache() -> None:
         }
     }
 
-    provider = manager.get_provider("frogbot")
-
-    assert provider.id == "frogbot"
-    assert provider.runtime == "openai_compatible"
-    assert provider.default_base_url == "https://app.frogbot.ai/api/v1"
-    assert not provider.requires_base_url
-    assert provider.base_url_editable
-    assert provider.model_list_strategy == "models_dev_only"
-
-
-@pytest.mark.usefixtures("_isolate_provider_manager")
-def test_dynamic_provider_override_normalizes_chat_endpoint_base_url() -> None:
-    """
-    动态提供方的聊天端点覆盖值规范化为基础地址。
-    """
-    manager = LLMProviderManager()
-    manager._models_dev_data = {
-        "bailing": {
-            "id": "bailing",
-            "name": "Bailing",
-            "npm": "@ai-sdk/openai-compatible",
-            "env": ["BAILING_API_TOKEN"],
-            "api": "https://api.tbox.cn/api/llm/v1/chat/completions",
-            "models": {},
-        }
-    }
-
-    provider = manager.get_provider("bailing")
-
-    assert provider.default_base_url == "https://api.tbox.cn/api/llm/v1"
-    assert provider.api_key_label == "API Token"
-
-
-@pytest.mark.usefixtures("_isolate_provider_manager")
-def test_dynamic_provider_skips_alias_only_models_dev_ids() -> None:
-    """
-    仅作为别名存在的模型目录标识不单独暴露为提供方。
-    """
-    manager = LLMProviderManager()
-    manager._models_dev_data = {
-        "moonshotai": {
-            "id": "moonshotai",
-            "name": "Moonshot AI Intl",
-            "npm": "@ai-sdk/openai-compatible",
-            "env": ["MOONSHOT_API_KEY"],
-            "api": "https://api.moonshot.ai/v1",
-            "models": {},
-        }
-    }
-
     with pytest.raises(LLMProviderError):
-        manager.get_provider("moonshotai")
+        manager.get_provider("frogbot")
+    assert "frogbot" not in {item["id"] for item in manager.list_providers()}
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
-def test_dynamic_provider_skips_incompatible_models_dev_provider() -> None:
+def test_builtin_provider_catalog_exposes_generic_entries_and_curated_vendors() -> None:
     """
-    跳过运行时不兼容的动态提供方。
+    内置目录前两位暴露通用 OpenAI 与 Anthropic 兼容入口，并移除冗余中转预设。
     """
     manager = LLMProviderManager()
-    manager._models_dev_data = {
-        "azure": {
-            "id": "azure",
-            "name": "Azure",
-            "npm": "@ai-sdk/azure",
-            "env": ["AZURE_API_KEY"],
-            "models": {},
-        }
-    }
+    providers = asyncio.run(manager.list_providers_async())
+    provider_ids = [item["id"] for item in providers]
 
-    with pytest.raises(LLMProviderError):
-        manager.get_provider("azure")
+    assert provider_ids[:2] == ["openai", "anthropic-compatible"]
+    for kept in ("opencode", "modelscope", "qiniu-ai", "openrouter", "siliconflow"):
+        assert kept in provider_ids
+    for removed in (
+        "atlascloud",
+        "api-route",
+        "cheaperinference",
+        "runcrate",
+        "obscurify-ai",
+        "cheapaimodel",
+        "uberllm",
+        "trustedrouter",
+        "aigrow",
+        "jiekou",
+        "kilo",
+        "llama",
+        "llmgateway",
+        "poe",
+        "qihang-ai",
+        "huggingface",
+        "nova",
+        "fireworks-ai",
+    ):
+        assert removed not in provider_ids
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
-def test_dynamic_provider_without_known_base_url_requires_manual_input() -> None:
+def test_generic_anthropic_compatible_provider_runtime_and_metadata_boundary() -> None:
     """
-    动态提供方没有已知基础地址时要求用户手动填写。
+    通用 Anthropic 兼容入口要求填写地址、规范化 /v1 路径且不信任官方上限元数据。
     """
     manager = LLMProviderManager()
-    manager._models_dev_data = {
-        "custom-anthropic": {
-            "id": "custom-anthropic",
-            "name": "Custom Anthropic",
-            "npm": "@ai-sdk/anthropic",
-            "env": ["CUSTOM_ANTHROPIC_KEY"],
-            "models": {},
-        }
-    }
+    provider = manager.get_provider("anthropic-compatible")
 
-    provider = manager.get_provider("custom-anthropic")
-
+    assert provider.name == "Anthropic 兼容"
     assert provider.runtime == "anthropic_compatible"
-    assert provider.requires_base_url
     assert provider.base_url_editable
-    assert provider.model_list_strategy == "anthropic_compatible"
+    assert provider.requires_base_url
+    assert provider.supports_model_refresh
+    assert provider.model_list_strategy == "anthropic_endpoint"
+
+    runtime = asyncio.run(
+        manager.resolve_runtime(
+            provider_id="anthropic-compatible",
+            model="claude-sonnet-4-6",
+            api_key="sk-ant-relay",
+            base_url="https://relay.example.com/anthropic/v1",
+        )
+    )
+
+    assert runtime["runtime"] == "anthropic_compatible"
+    assert runtime["base_url"] == "https://relay.example.com/anthropic"
+    assert not runtime["model_profile_endpoint_matched"]
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
-def test_list_providers_async_loads_models_dev_before_serializing() -> None:
+@pytest.mark.parametrize(
+    ("input_base_url", "expected_models_url"),
+    [
+        ("https://relay.example.com", "https://relay.example.com/v1/models"),
+        ("https://relay.example.com/v1", "https://relay.example.com/v1/models"),
+        ("https://relay.example.com/anthropic/v1", "https://relay.example.com/anthropic/v1/models"),
+    ],
+)
+def test_generic_anthropic_compatible_lists_models_from_endpoint(
+    input_base_url: str,
+    expected_models_url: str,
+) -> None:
     """
-    异步列出提供方前先加载模型目录，保证序列化结果完整。
+    通用 Anthropic 兼容入口按标准 Anthropic 协议头请求目标 `/v1/models` 刷新模型。
     """
     manager = LLMProviderManager()
-    payload = {
-        "frogbot": {
-            "id": "frogbot",
-            "name": "FrogBot",
-            "npm": "@ai-sdk/openai-compatible",
-            "env": ["FROGBOT_API_KEY"],
-            "api": "https://app.frogbot.ai/api/v1",
-            "models": {},
-        }
+    manager._models_dev_data = {}
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        """
+        模拟 Anthropic `/v1/models` JSON 响应。
+        """
+
+        def raise_for_status(self) -> None:
+            """
+            模拟 HTTP 200 状态校验。
+            """
+
+        def json(self) -> dict[str, object]:
+            """
+            返回包含标准与自定义模型的列表载荷。
+            """
+            return {
+                "data": [
+                    {"id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6"},
+                    {"id": "custom-relay-model"},
+                ]
+            }
+
+    class _FakeAsyncRequest:
+        """
+        捕获目标 URL 与请求头的最小异步请求替身。
+        """
+
+        def __init__(self, headers: dict[str, str]) -> None:
+            """
+            记录构造时传入的请求头。
+            """
+            self.headers = headers
+
+        async def get_res(self, url: str, raise_exception: bool = False) -> _FakeResponse:
+            """
+            记录请求参数并返回测试模型列表。
+            """
+            captured["url"] = url
+            captured["headers"] = dict(self.headers)
+            captured["raise_exception"] = raise_exception
+            return _FakeResponse()
+
+    def _fake_build_request(use_proxy=None, headers=None):
+        """
+        返回捕获请求头的异步请求替身。
+        """
+        del use_proxy
+        return _FakeAsyncRequest(headers or {})
+
+    with patch.object(manager, "_build_async_request", side_effect=_fake_build_request):
+        models = asyncio.run(
+            manager.list_models(
+                provider_id="anthropic-compatible",
+                api_key="sk-ant-test",
+                base_url=input_base_url,
+                user_agent="CustomAgent/1.0",
+            )
+        )
+
+    assert captured["url"] == expected_models_url
+    assert captured["raise_exception"] is True
+    assert captured["headers"] == {
+        "User-Agent": "CustomAgent/1.0",
+        "x-api-key": "sk-ant-test",
+        "anthropic-version": "2023-06-01",
     }
+    assert [(item["id"], item["name"], item["transport"], item["source"]) for item in models] == [
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic", "provider"),
+        ("custom-relay-model", "custom-relay-model", "anthropic", "provider"),
+    ]
+
+
+@pytest.mark.usefixtures("_isolate_provider_manager")
+def test_generic_anthropic_compatible_skips_invalid_items_and_rejects_bad_payload() -> None:
+    """
+    通用 Anthropic 兼容端点刷新模型时过滤畸形条目，并在非列表响应或空地址时报错。
+    """
+    manager = LLMProviderManager()
+    manager._models_dev_data = {}
+    payloads: list[dict[str, object]] = [
+        {"data": ["bad-item", {"id": ""}, {"id": "claude-haiku-4-5"}]},
+        {"data": "invalid"},
+    ]
+
+    class _FakeResponse:
+        """
+        依次返回预置响应体的最小 HTTP 响应替身。
+        """
+
+        def __init__(self, body: dict[str, object]) -> None:
+            """
+            记录本次响应体。
+            """
+            self._body = body
+
+        def raise_for_status(self) -> None:
+            """
+            模拟 HTTP 200 状态校验。
+            """
+
+        def json(self) -> dict[str, object]:
+            """
+            返回本次预置 JSON 载荷。
+            """
+            return self._body
+
+    class _FakeAsyncRequest:
+        """
+        顺序返回预置模型列表响应的异步请求替身。
+        """
+
+        async def get_res(self, url: str, raise_exception: bool = False) -> _FakeResponse:
+            """
+            消费下一份测试载荷。
+            """
+            del url, raise_exception
+            return _FakeResponse(payloads.pop(0))
+
+    with patch.object(manager, "_build_async_request", return_value=_FakeAsyncRequest()):
+        models = asyncio.run(
+            manager.list_models(
+                provider_id="anthropic-compatible",
+                api_key="sk-ant-test",
+                base_url="https://relay.example.com/v1",
+            )
+        )
+        assert [item["id"] for item in models] == ["claude-haiku-4-5"]
+
+        with pytest.raises(LLMProviderError, match="响应格式不正确"):
+            asyncio.run(
+                manager.list_models(
+                    provider_id="anthropic-compatible",
+                    api_key="sk-ant-test",
+                    base_url="https://relay.example.com/v1",
+                )
+            )
+
+    with pytest.raises(LLMProviderError, match="缺少有效的 Base URL"):
+        asyncio.run(
+            manager._list_models_from_anthropic_endpoint(
+                provider_id="anthropic-compatible",
+                api_key="sk-ant-test",
+                base_url="   ",
+            )
+        )
+
+
+@pytest.mark.usefixtures("_isolate_provider_manager")
+def test_generic_openai_compatible_lists_models_via_authenticated_endpoint() -> None:
+    """
+    通用 OpenAI 兼容入口通过目标 `/models` 端点携带密钥刷新模型列表。
+    """
+    manager = LLMProviderManager()
+    requests: list[httpx.Request] = []
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        """
+        记录发往兼容端点的模型目录请求并返回标准列表响应。
+        """
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "gpt-5.4", "object": "model", "created": 0},
+                    {"id": "custom-openai-model", "object": "model", "created": 0},
+                ],
+            },
+        )
 
     with patch.object(
         manager,
-        "get_models_dev_data",
-        AsyncMock(
-            side_effect=lambda force_refresh=False, use_proxy=None: (
-                manager.__dict__.update({"_models_dev_data": payload}) or payload
+        "_build_sdk_http_client",
+        side_effect=lambda use_proxy=None: httpx.AsyncClient(transport=httpx.MockTransport(_respond)),
+    ):
+        models = asyncio.run(
+            manager.list_models(
+                provider_id="openai",
+                api_key="sk-openai-relay",
+                base_url="https://relay.example.com/v1",
             )
-        ),
-    ) as fetch_mock:
-        providers = asyncio.run(manager.list_providers_async())
+        )
 
-    fetch_mock.assert_awaited_once_with(force_refresh=False, use_proxy=None)
-    assert "frogbot" in {item["id"] for item in providers}
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert str(requests[0].url) == "https://relay.example.com/v1/models"
+    assert requests[0].headers["Authorization"] == "Bearer sk-openai-relay"
+    assert [(item["id"], item["source"], item["context_tokens"]) for item in models] == [
+        ("custom-openai-model", "provider", None),
+        ("gpt-5.4", "provider", None),
+    ]
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
-def test_list_models_uses_dynamic_provider_after_refresh() -> None:
+def test_list_models_for_catalog_builtin_uses_models_dev_after_refresh() -> None:
     """
-    刷新模型目录后可按新发现的动态提供方列出模型。
+    保留的目录型内置提供方在刷新后仍从 models.dev 读取模型列表。
     """
     manager = LLMProviderManager()
     payload = {
-        "frogbot": {
-            "id": "frogbot",
-            "name": "FrogBot",
-            "npm": "@ai-sdk/openai-compatible",
-            "env": ["FROGBOT_API_KEY"],
-            "api": "https://app.frogbot.ai/api/v1",
+        "modelscope": {
+            "id": "modelscope",
+            "name": "ModelScope",
             "models": {
-                "frog-1": {
-                    "name": "Frog 1",
+                "Qwen/Qwen3-235B": {
+                    "name": "Qwen3 235B",
                     "limit": {"context": 131072},
                 }
             },
@@ -203,21 +353,22 @@ def test_list_models_uses_dynamic_provider_after_refresh() -> None:
 
     async def _load_models_dev(force_refresh: bool = False, use_proxy=None):
         """
-        返回测试预设的动态模型目录，避免真实目录请求。
+        返回测试预设的模型目录，避免真实目录请求。
         """
+        del force_refresh, use_proxy
         manager._models_dev_data = payload
         return payload
 
     with patch.object(manager, "get_models_dev_data", AsyncMock(side_effect=_load_models_dev)):
         models = asyncio.run(
             manager.list_models(
-                provider_id="frogbot",
+                provider_id="modelscope",
                 api_key="sk-test",
                 force_refresh=True,
             )
         )
 
-    assert [item["id"] for item in models] == ["frog-1"]
+    assert [item["id"] for item in models] == ["Qwen/Qwen3-235B"]
     assert models[0]["source"] == "models.dev"
 
 
@@ -228,10 +379,9 @@ def test_get_models_dev_data_falls_back_to_bundled_file_when_fetch_and_cache_fai
     """
     manager = LLMProviderManager()
     payload = {
-        "frogbot": {
-            "id": "frogbot",
-            "name": "FrogBot",
-            "npm": "@ai-sdk/openai-compatible",
+        "qiniu-ai": {
+            "id": "qiniu-ai",
+            "name": "Qiniu",
             "models": {},
         }
     }
@@ -250,16 +400,19 @@ def test_get_models_dev_data_falls_back_to_bundled_file_when_fetch_and_cache_fai
 @pytest.mark.usefixtures("_isolate_provider_manager")
 def test_cached_models_dev_payload_falls_back_to_bundled_file() -> None:
     """
-    缓存载荷不可用时读取随包附带的模型目录。
+    缓存载荷不可用时读取随包附带的模型目录用于查询内置提供方模型元数据。
     """
     manager = LLMProviderManager()
     payload = {
-        "frogbot": {
-            "id": "frogbot",
-            "name": "FrogBot",
-            "npm": "@ai-sdk/openai-compatible",
-            "api": "https://app.frogbot.ai/api/v1",
-            "models": {},
+        "qiniu-ai": {
+            "id": "qiniu-ai",
+            "name": "Qiniu",
+            "models": {
+                "deepseek-r1": {
+                    "name": "DeepSeek R1",
+                    "limit": {"context": 65536},
+                }
+            },
         }
     }
 
@@ -269,10 +422,10 @@ def test_cached_models_dev_payload_falls_back_to_bundled_file() -> None:
         patch.object(manager, "_models_dev_cache_path", missing_cache_path),
         patch.object(manager, "_load_bundled_models_dev_payload", return_value=payload),
     ):
-        provider = manager.get_provider("frogbot")
+        metadata = manager.resolve_cached_model_metadata("qiniu-ai", "deepseek-r1")
 
-    assert provider.id == "frogbot"
-    assert provider.default_base_url == "https://app.frogbot.ai/api/v1"
+    assert metadata is not None
+    assert metadata["name"] == "DeepSeek R1"
 
 
 @pytest.mark.usefixtures("_isolate_provider_manager")
