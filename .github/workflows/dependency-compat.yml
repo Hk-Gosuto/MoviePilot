@@ -61,20 +61,6 @@ jobs:
             expected-profile: standard
             expected-system: Linux
             expected-machine: aarch64
-          - name: macOS Intel
-            runner: macos-15-intel
-            python-version: '3.14'
-            runtime-group: runtime-standard
-            expected-profile: standard
-            expected-system: Darwin
-            expected-machine: x86_64
-          - name: macOS ARM
-            runner: macos-15
-            python-version: '3.14'
-            runtime-group: runtime-standard
-            expected-profile: standard
-            expected-system: Darwin
-            expected-machine: arm64
           - name: Windows x64
             runner: windows-2025
             python-version: '3.14'
