@@ -2129,3 +2129,278 @@ def test_settle_accepted_download_records_actual_path_for_existing_torrent():
     assert history.path == "/volume4/flow/The.Ordinary.Jackpot.S01E01.1080p.mkv"
     assert files[0].fullpath == "/volume4/flow/The.Ordinary.Jackpot.S01E01.1080p.mkv"
     assert files[0].savepath == "/volume4/flow"
+
+
+def test_prepare_download_single_syncs_context_media_and_meta_after_resource_download_event(
+    monkeypatch,
+):
+    """
+    ResourceDownload 事件处理器替换 context.media_info 和 context.meta_info 后，下载目录与准备事实应同步生效。
+    """
+    chain = DownloadChain.__new__(DownloadChain)
+    resolved_dir_medias = []
+    converted_media = MediaInfo(
+        tmdb_info={
+            "id": 1483525,
+            "media_type": MediaType.MOVIE,
+            "title": "可能的爱",
+            "release_date": "2026-01-01",
+        }
+    )
+    converted_media.set_library_category("外语电影")
+    updated_meta = MetaInfo("Possible.Love.2026.S01E02.1080p")
+
+    def replace_context_media(_event_type, event_data):
+        """
+        模拟插件在 ResourceDownload 同步事件中替换上下文媒体与元数据对象。
+        """
+        event_data.context.media_info = converted_media
+        event_data.context.meta_info = updated_meta
+        return SimpleNamespace(event_data=event_data)
+
+    def resolve_dir(media_info, save_path=None):
+        """
+        记录目录解析实际使用的媒体对象并返回固定下载目录。
+        """
+        resolved_dir_medias.append((media_info, save_path))
+        return "local", Path("/downloads/movies"), None
+
+    monkeypatch.setattr(eventmanager, "send_event", replace_context_media)
+    monkeypatch.setattr(download_submission, "TorrentHelper", _FakeTorrentHelper)
+    monkeypatch.setattr(chain, "_resolve_media_download_dir", resolve_dir)
+
+    context = Context(
+        meta_info=MetaInfo("Possible.Love.2026.1080p"),
+        media_info=MediaInfo(
+            media_source=MediaSource.Douban,
+            media_id="36847425",
+            type=MediaType.MOVIE,
+            title="可能的爱",
+        ),
+        torrent_info=TorrentInfo(title="Possible.Love.2026.1080p"),
+    )
+
+    prepared, error_msg = chain._prepare_download_single(
+        context=context,
+        torrent_file=None,
+        torrent_content="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        episodes=None,
+        channel=None,
+        source="Manual",
+        downloader=None,
+        save_path=None,
+        userid=None,
+        username="tester",
+    )
+
+    assert error_msg is None
+    assert prepared is not None
+    assert resolved_dir_medias == [(converted_media, None)]
+    assert prepared.media is converted_media
+    assert prepared.meta is updated_meta
+    assert context.selected_episodes == [2]
+
+
+def test_settle_download_success_persists_origin_media_trace_and_snapshot_roundtrip():
+    """
+    发生跨来源主身份转换的下载应在 DownloadHistory.note 和持久处理快照中保留 origin_media。
+    """
+    from app.application.chain.events import (
+        restore_download_processing,
+        snapshot_download_processing,
+    )
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.runtime_config = SimpleNamespace(media_extensions=(".mkv",), video_extensions=(".mkv",))
+    chain.durable_event_writer = None
+    chain.download_history_repository = MagicMock()
+    chain._build_download_notification = MagicMock(return_value=None)
+    chain._submit_download_added_task = MagicMock()
+    chain.eventmanager = MagicMock()
+
+    media = MediaInfo(
+        tmdb_info={
+            "id": 1483525,
+            "media_type": MediaType.MOVIE,
+            "title": "可能的爱",
+            "release_date": "2026-01-01",
+        }
+    )
+    media.douban_id = "36847425"
+    meta = MetaInfo("Possible.Love.2026.1080p")
+    torrent = TorrentInfo(title="Possible.Love.2026.1080p")
+    origin_media = {"media_source": "douban", "media_id": "36847425"}
+    context = Context(
+        meta_info=meta,
+        media_info=media,
+        torrent_info=torrent,
+        origin_media=origin_media,
+    )
+
+    chain._settle_download_success(
+        context=context,
+        media=media,
+        meta=meta,
+        torrent=torrent,
+        folder_name="Possible.Love.2026",
+        file_list=["Possible.Love.2026.mkv"],
+        download_dir=Path("/downloads/movies"),
+        layout="Original",
+        downloader="qb",
+        download_hash="hash-origin-1",
+        download_episodes=None,
+        episodes=None,
+        channel=None,
+        source="Manual",
+        userid=None,
+        username="tester",
+        torrent_content=b"torrent",
+        custom_words=None,
+    )
+
+    history, _files = chain.download_history_repository.add.call_args.args
+    assert history.media_source == MediaSource.TMDB
+    assert history.media_id == "1483525"
+    assert history.note["origin_media"] == origin_media
+
+    payload = snapshot_download_processing(
+        context=context,
+        download_dir=Path("/downloads/movies"),
+        torrent_content=b"torrent",
+        download_hash="hash-origin-1",
+        downloader="qb",
+    )
+    restored = restore_download_processing(payload)
+    assert restored.context.origin_media == origin_media
+
+
+def test_execute_download_single_emits_resource_submit_with_hashes_and_cancels_before_downloader(
+    monkeypatch,
+):
+    """
+    ResourceSubmit 在拉取种子并解析出真实 info_hash 后触发；取消时不得进入下载器提交或标记副作用开始。
+    """
+    from app.application.download.admission import SubscriptionDownloadGovernance
+    from app.schemas.types import ChainEventType
+
+    chain = DownloadChain.__new__(DownloadChain)
+    captured = []
+    submitted = MagicMock(return_value=("should-not-run", None))
+    mark_started = MagicMock()
+    decision_observer = MagicMock()
+    governance = SubscriptionDownloadGovernance(
+        mark_started=mark_started,
+        decision_observer=decision_observer,
+    )
+
+    def handle_event(event_type, event_data):
+        """
+        记录链式事件并在 ResourceSubmit 阶段按真实哈希取消提交。
+        """
+        captured.append((event_type, event_data))
+        if event_type == ChainEventType.ResourceSubmit:
+            event_data.cancel = True
+            event_data.source = "订阅助手（增强版）"
+            event_data.reason = "命中近期删除指纹"
+        return SimpleNamespace(event_data=event_data)
+
+    monkeypatch.setattr(eventmanager, "send_event", handle_event)
+    monkeypatch.setattr(download_submission, "TorrentHelper", _FakeTorrentHelper)
+    monkeypatch.setattr(chain, "_resolve_media_download_dir", lambda **_kw: ("local", Path("/downloads/movies"), None))
+    monkeypatch.setattr(chain, "_submit_prepared_download", submitted)
+
+    torrent_hash = "3db38150daf7c83acf17bb413d9e29c3c8a90efd"
+    context = Context(
+        meta_info=MetaInfo("Forgotten.Island.2026.2160p.mkv"),
+        media_info=MediaInfo(
+            media_source=MediaSource.TMDB,
+            media_id="1465063",
+            type=MediaType.MOVIE,
+            title="忘却之岛",
+            year="2026",
+        ),
+        torrent_info=TorrentInfo(
+            title="Forgotten Island 2026 2160p-RiKKi",
+            site_downloader="qb-main",
+        ),
+    )
+
+    download_id, error_msg = chain._execute_download_single(
+        context=context,
+        torrent_content=f"magnet:?xt=urn:btih:{torrent_hash}",
+        source='Subscribe|{"id": 9}',
+        username="tester",
+        label="movie",
+        return_detail=True,
+        governance=governance,
+        user_specified=False,
+    )
+
+    assert download_id is None
+    assert error_msg == "下载被事件取消"
+    submitted.assert_not_called()
+    mark_started.assert_not_called()
+    decision_observer.assert_called_once_with(context, "rejected", "命中近期删除指纹")
+    assert [et for et, _ in captured] == [ChainEventType.ResourceDownload, ChainEventType.ResourceSubmit]
+    submit_data = captured[1][1]
+    assert submit_data.hashes == [torrent_hash]
+    assert submit_data.downloader == "qb-main"
+    assert submit_data.save_path == "/downloads/movies"
+    assert submit_data.origin == 'Subscribe|{"id": 9}'
+    assert submit_data.user_specified is False
+    assert submit_data.options["label"] == "movie"
+
+
+def test_execute_download_single_passes_parsed_hashes_through_resource_submit_when_allowed(
+    monkeypatch,
+):
+    """
+    ResourceSubmit 放行时应把已计算的真实哈希传给提交阶段并正常提交下载器。
+    """
+    from app.schemas.types import ChainEventType
+
+    chain = DownloadChain.__new__(DownloadChain)
+    seen_submit = []
+    submitted = MagicMock(return_value=("3db38150daf7c83acf17bb413d9e29c3c8a90efd", "添加下载成功"))
+
+    def handle_event(event_type, event_data):
+        """
+        放行全部链式事件并记录 ResourceSubmit 载荷。
+        """
+        if event_type == ChainEventType.ResourceSubmit:
+            seen_submit.append(event_data)
+        return SimpleNamespace(event_data=event_data)
+
+    monkeypatch.setattr(eventmanager, "send_event", handle_event)
+    monkeypatch.setattr(download_submission, "TorrentHelper", _FakeTorrentHelper)
+    monkeypatch.setattr(chain, "_resolve_media_download_dir", lambda **_kw: ("local", Path("/downloads/movies"), None))
+    monkeypatch.setattr(chain, "_submit_prepared_download", submitted)
+
+    torrent_hash = "3db38150daf7c83acf17bb413d9e29c3c8a90efd"
+    context = Context(
+        meta_info=MetaInfo("Forgotten.Island.2026.2160p.mkv"),
+        media_info=MediaInfo(
+            media_source=MediaSource.TMDB,
+            media_id="1465063",
+            type=MediaType.MOVIE,
+            title="忘却之岛",
+            year="2026",
+        ),
+        torrent_info=TorrentInfo(title="Forgotten Island 2026 2160p-RiKKi"),
+    )
+
+    download_id, error_msg = chain._execute_download_single(
+        context=context,
+        torrent_content=f"magnet:?xt=urn:btih:{torrent_hash}",
+        downloader="qb-explicit",
+        return_detail=True,
+        user_specified=True,
+    )
+
+    assert download_id == torrent_hash
+    assert error_msg == "添加下载成功"
+    assert len(seen_submit) == 1
+    assert seen_submit[0].hashes == [torrent_hash]
+    assert seen_submit[0].downloader == "qb-explicit"
+    assert seen_submit[0].user_specified is True
+    assert submitted.call_args.kwargs["task_hashes"] == frozenset({torrent_hash})

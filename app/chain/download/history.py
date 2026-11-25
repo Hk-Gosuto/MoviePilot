@@ -129,6 +129,9 @@ class DownloadHistoryOwner(_DownloadOwnerBase):
         )
         if context.subscription_download:
             history_note["subscription_download"] = context.subscription_download
+        origin_media = getattr(context, "origin_media", None)
+        if origin_media:
+            history_note["origin_media"] = origin_media
         history_note[torrent_rules.CONFIRMED_SELECTION_NOTE_KEY] = self._confirmed_task_selection(
             previous_selection,
             downloader=downloader,

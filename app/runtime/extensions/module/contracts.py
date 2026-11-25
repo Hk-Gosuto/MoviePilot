@@ -153,6 +153,7 @@ _METHOD_CONTRACTS = {
         result_shape=ModuleResultShape.MAPPING,
         aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
         required_parameters=("name", "mtype", "year", "season"),
+        optional_parameters=("imdbid",),
     ),
     "update_recognize_cache": ModuleMethodContract(
         family="media-recognition",
@@ -1537,6 +1538,22 @@ _METHOD_CONTRACTS = {
         aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
         required_parameters=("content", "download_dir", "cookie", "episodes", "category", "label", "downloader"),
         optional_parameters=("custom_words", "episode_selection", "confirmed_selection", "user_specified"),
+    ),
+    "confirm_pending_download": ModuleMethodContract(
+        family="downloader",
+        input_contract="PendingDownloadConfirmRequest",
+        result_contract="PendingDownloadCheckResult | None",
+        result_shape=ModuleResultShape.MODEL,
+        aggregation=ModuleResultAggregation.FIRST_NON_EMPTY,
+        required_parameters=("hashes",),
+        optional_parameters=(
+            "downloader",
+            "episodes",
+            "custom_words",
+            "episode_selection",
+            "confirmed_selection",
+            "user_specified",
+        ),
     ),
     "download_added": ModuleMethodContract(
         family="downloader",
