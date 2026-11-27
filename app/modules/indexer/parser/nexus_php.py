@@ -588,6 +588,16 @@ class NexusPhpSiteUserInfo(SiteParserBase):
         )
         return user_level_match.group(1).strip() if user_level_match else None
 
+    def _set_detail_user_level(self, user_level: str, *, keep_existing_without_level: bool = False) -> None:
+        """
+        提取括号组名后的通用等级。缺少通用等级时默认保留字段原文，
+        Audiences 的可选徽章则保留之前已解析的等级。
+        """
+        level_text = user_level.strip()
+        common_level = re.sub(r"^\([^)]*\)\s*", "", level_text)
+        if common_level or not keep_existing_without_level:
+            self.user_level = common_level or level_text
+
     def _get_user_level(self, html: etree._Element) -> None:
         """
         从用户详情页或首页中解析用户等级。
@@ -596,7 +606,7 @@ class NexusPhpSiteUserInfo(SiteParserBase):
         user_levels_text = html.xpath('//tr/td[text()="等級" or text()="等级" or *[text()="等级"]]/'
                                       'following-sibling::td[1]/img[1]/@title')
         if user_levels_text:
-            self.user_level = user_levels_text[0].strip()
+            self._set_detail_user_level(user_levels_text[0])
             return
 
         user_levels_text = html.xpath('//tr/td[text()="等級" or text()="等级"]/'
@@ -604,13 +614,13 @@ class NexusPhpSiteUserInfo(SiteParserBase):
                                       '|//tr/td[text()="等級" or text()="等级"]/'
                                       'following-sibling::td[1 and img[not(@title)]]')
         if user_levels_text:
-            self.user_level = user_levels_text[0].xpath("string(.)").strip()
+            self._set_detail_user_level(user_levels_text[0].xpath("string(.)"))
             return
 
         user_levels_text = html.xpath('//tr/td[text()="等級" or text()="等级"]/'
                                       'following-sibling::td[1]')
         if user_levels_text:
-            self.user_level = user_levels_text[0].xpath("string(.)").strip()
+            self._set_detail_user_level(user_levels_text[0].xpath("string(.)"))
             return
 
         user_levels_text = html.xpath('//a[contains(@href, "userdetails")]/text()')
@@ -618,7 +628,7 @@ class NexusPhpSiteUserInfo(SiteParserBase):
             for user_level_text in user_levels_text:
                 user_level_match = re.search(r"\[(.*)]", user_level_text)
                 if user_level_match and user_level_match.group(1).strip():
-                    self.user_level = user_level_match.group(1).strip()
+                    self._set_detail_user_level(user_level_match.group(1))
                     break
 
         user_level = self._parse_user_level_marker(html.xpath("string(.)"), self.userid)
