@@ -111,7 +111,7 @@ class _ProviderCatalog:
     @classmethod
     def _builtin_provider_specs(cls) -> tuple[ProviderSpec, ...]:
         """
-        返回受支持的内置 provider 定义。
+        返回官方模型服务、云平台、知名聚合服务及通用兼容入口的内置定义。
 
         OpenAI 兼容与 Anthropic 兼容分别保留为用户自定义 OpenAI-compatible 与
         Anthropic-compatible 兜底入口，均要求填写 Base URL；ChatGPT 与 Anthropic
@@ -144,6 +144,9 @@ class _ProviderCatalog:
             model_list_strategy: str = "openai_compatible",
             api_key_label: str = "API Key",
         ) -> ProviderSpec:
+            """
+            构建使用 OpenAI 兼容协议的模型服务或平台定义。
+            """
             return ProviderSpec(
                 id=provider_id,
                 name=name,
@@ -170,6 +173,9 @@ class _ProviderCatalog:
             description: Optional[str] = None,
             api_key_label: str = "API Key",
         ) -> ProviderSpec:
+            """
+            构建通过 models.dev 提供模型目录的平台定义。
+            """
             return openai_provider(
                 provider_id=provider_id,
                 name=name,
@@ -194,6 +200,9 @@ class _ProviderCatalog:
             api_key_hint: Optional[str] = None,
             description: Optional[str] = None,
         ) -> ProviderSpec:
+            """
+            构建使用 Anthropic 兼容协议的模型服务定义。
+            """
             return ProviderSpec(
                 id=provider_id,
                 name=name,
@@ -815,6 +824,69 @@ class _ProviderCatalog:
                 api_key_hint="填写 Z.AI API Key，可在通用 API 与 Coding Plan 端点间切换。",
                 description="Z.AI 官方端点。",
             ),
+            openai_provider(
+                provider_id="atlascloud",
+                name="Atlas Cloud",
+                default_base_url="https://api.atlascloud.ai/v1",
+                sort_order=240,
+                description="Atlas Cloud 模型推理服务。",
+            ),
+            catalog_openai_provider(
+                provider_id="fireworks-ai",
+                name="Fireworks AI",
+                default_base_url="https://api.fireworks.ai/inference/v1",
+                sort_order=250,
+                description="Fireworks AI 官方模型推理服务。",
+            ),
+            catalog_openai_provider(
+                provider_id="huggingface",
+                name="Hugging Face",
+                default_base_url="https://router.huggingface.co/v1",
+                sort_order=260,
+                description="Hugging Face Inference Providers 官方入口。",
+            ),
+            catalog_openai_provider(
+                provider_id="jiekou",
+                name="接口AI",
+                default_base_url="https://api.jiekou.ai/openai",
+                sort_order=270,
+                description="接口AI 模型服务平台。",
+            ),
+            catalog_openai_provider(
+                provider_id="kilo",
+                name="Kilo",
+                default_base_url="https://api.kilo.ai/api/gateway",
+                sort_order=280,
+                description="Kilo 官方 AI Gateway。",
+            ),
+            catalog_openai_provider(
+                provider_id="llama",
+                name="Meta Llama",
+                default_base_url="https://api.llama.com/compat/v1",
+                sort_order=290,
+                description="Meta Llama 官方 OpenAI-compatible 端点。",
+            ),
+            catalog_openai_provider(
+                provider_id="llmgateway",
+                name="LLM Gateway",
+                default_base_url="https://api.llmgateway.io/v1",
+                sort_order=300,
+                description="LLM Gateway 官方模型网关服务。",
+            ),
+            catalog_openai_provider(
+                provider_id="nova",
+                name="Amazon Nova",
+                default_base_url="https://api.nova.amazon.com/v1",
+                sort_order=310,
+                description="Amazon Nova 官方模型服务。",
+            ),
+            catalog_openai_provider(
+                provider_id="poe",
+                name="Poe",
+                default_base_url="https://api.poe.com/v1",
+                sort_order=320,
+                description="Poe 官方 OpenAI-compatible API。",
+            ),
         ]
         return tuple(providers)
 
@@ -921,7 +993,11 @@ class _ProviderCatalog:
 
     def get_provider(self, provider_id: str) -> ProviderSpec:
         """
-        按 provider id 获取定义。
+        按标识获取当前支持的内置提供商定义。
+
+        :param provider_id: 当前支持的提供商标识
+        :return: 用于连接模型服务的定义
+        :raises LLMProviderError: 提供商标识没有受支持的内置定义
         """
         normalized = self._normalize_provider_id(provider_id)
         for spec in self._provider_specs():

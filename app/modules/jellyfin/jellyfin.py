@@ -2,6 +2,7 @@
 Jellyfin 媒体服务器客户端，负责内容查询、图片、刷新及 Webhook 转换。
 """
 
+import hashlib
 import json
 import posixpath
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
@@ -16,7 +17,8 @@ from app.modules._base.embybrowse import (
     emby_browse_items,
     emby_filter_options,
     emby_item_detail,
-    emby_report_progress,
+    emby_prepare_playback_session,
+    emby_report_progress_detail,
     emby_search_library,
     emby_season_episodes,
     emby_seasons,
@@ -425,13 +427,17 @@ class Jellyfin:
         if not self._host or not self._apikey:
             return None
         url = f"{self._host}Users/authenticatebyname"
+        device_id = f"mp-user-{hashlib.sha256(username.encode('utf-8')).hexdigest()[:16]}"
+        auth_value = (
+            f'MediaBrowser Client="MoviePilot", '
+            f'Device="MoviePilot", '
+            f'DeviceId="{device_id}", '
+            f'Version="3.0.0", '
+            f'Token="{self._apikey}"'
+        )
         try:
             res = self._request(headers={
-                'X-Emby-Authorization': f'MediaBrowser Client="MoviePilot", '
-                f'Device="requests", '
-                f'DeviceId="1", '
-                f'Version="1.0.0", '
-                f'Token="{self._apikey}"',
+                'X-Emby-Authorization': auth_value,
                 'Content-Type': 'application/json',
                 "Accept": "application/json"
             }).post_res(
@@ -799,6 +805,35 @@ class Jellyfin:
         cfg = self._browse_config(require_user=False)
         return emby_subtitle_url(cfg, item_id, subtitle_id) if cfg else None
 
+    def prepare_playback_session(
+        self,
+        item_id: str,
+        *,
+        media_source_id: Optional[str] = None,
+        username: Optional[str] = None,
+        user_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        device_name: Optional[str] = None,
+        platform: Optional[str] = None,
+        app_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        向 Jellyfin 申请本次播放会话的官方 PlaySessionId 并构造同源流会话头。
+        """
+        _ = platform
+        cfg = self._browse_config(username)
+        if not cfg:
+            return None
+        return emby_prepare_playback_session(
+            cfg,
+            item_id,
+            media_source_id=media_source_id,
+            user_token=user_token,
+            client_id=client_id,
+            device_name=device_name,
+            app_version=app_version,
+        )
+
     def report_progress(
         self,
         item_id: str,
@@ -809,21 +844,47 @@ class Jellyfin:
         is_paused: bool = False,
         state: str = "playing",
         username: Optional[str] = None,
-    ) -> bool:
+        play_session_id: Optional[str] = None,
+        event_name: Optional[str] = None,
+        client_id: Optional[str] = None,
+        device_name: Optional[str] = None,
+        platform: Optional[str] = None,
+        app_version: Optional[str] = None,
+        play_method: str = "DirectPlay",
+        playback_time_ms: Optional[int] = None,
+        audio_stream_index: Optional[int] = None,
+        subtitle_stream_index: Optional[int] = None,
+        user_token: Optional[str] = None,
+        started_reported: bool = False,
+        allow_userdata_write: bool = True,
+        scrobbled: bool = False,
+    ) -> dict[str, Any]:
         """
-        将客户端播放进度回传给 Jellyfin 服务器。
+        将客户端播放进度与会话生命周期回传给 Jellyfin 服务器（有用户令牌走实时会话，无令牌自动兜底 UserData）。
         """
-        _ = duration_ms
+        _ = platform, playback_time_ms, scrobbled
         cfg = self._browse_config(username)
         if not cfg:
-            return False
-        return emby_report_progress(
+            return {"reported": False, "mode": "unsupported", "started_sent": False, "needs_account_bind": False}
+        return emby_report_progress_detail(
             cfg,
             item_id,
             position_ms,
             media_source_id=media_source_id,
+            duration_ms=duration_ms,
             is_paused=is_paused,
             state=state,
+            play_session_id=play_session_id,
+            event_name=event_name,
+            client_id=client_id,
+            device_name=device_name,
+            app_version=app_version,
+            play_method=play_method,
+            audio_stream_index=audio_stream_index,
+            subtitle_stream_index=subtitle_stream_index,
+            user_token=user_token,
+            started_reported=started_reported,
+            allow_userdata_write=allow_userdata_write,
         )
 
     def search_library(
@@ -1034,19 +1095,31 @@ class Jellyfin:
         item_id: str,
         item_type: Optional[str],
         media_source_id: Optional[str] = None,
+        *,
+        play_session_id: Optional[str] = None,
+        user_token: Optional[str] = None,
     ) -> Optional[str]:
         """
-        为原生播放器构造支持 Range 的 Jellyfin 静态文件流地址，支持指定多版本媒体源。
+        为原生播放器构造支持 Range 的 Jellyfin 静态文件流地址，支持指定多版本媒体源与会话标识。
 
         :param item_id: Jellyfin 条目标识
         :param item_type: 媒体服务器返回的条目类型
         :param media_source_id: 可选指定媒体源标识
+        :param play_session_id: 可选官方播放会话标识
+        :param user_token: 可选用户级访问令牌
         :return: Jellyfin 原始媒体流地址；实例配置或条目标识缺失时返回 None
         """
         cfg = self._browse_config(require_user=False)
         if not cfg:
             return None
-        return emby_stream_url(cfg, item_id, item_type, media_source_id=media_source_id)
+        return emby_stream_url(
+            cfg,
+            item_id,
+            item_type,
+            media_source_id=media_source_id,
+            play_session_id=play_session_id,
+            user_token=user_token,
+        )
 
     def _get_webhook_item_path(self, message: dict[str, Any]) -> Optional[str]:
         """
@@ -1545,7 +1618,7 @@ class Jellyfin:
         """
         查询用户最近入库的媒体条目。
 
-        :param num: 最多保留的条目数量，默认 20；先查询 100 条再按库路径筛选
+        :param num: 最多保留的条目数量，默认 20；按入库时间查询电影与剧集顶层条目后再按库路径筛选
         :param username: 用于限定可见内容的用户名，省略时使用当前实例的查询用户
         :param query: 可选查询内容投影，省略时保留原有请求和返回内容
         :return: 转换后的最新媒体列表；配置不完整、用户不可用或请求失败时返回 None
@@ -1558,10 +1631,14 @@ class Jellyfin:
             user = self.user
         if not user:
             return None
-        url = f"{self._host}Users/{user}/Items/Latest"
+        # Items/Latest 会让剧集季/集挤占电影，改为按入库时间查询电影与剧集顶层条目
+        url = f"{self._host}Users/{user}/Items"
         params = {
-            "Limit": 100,
-            "MediaTypes": "Video",
+            "Recursive": "true",
+            "IncludeItemTypes": "Movie,Series",
+            "SortBy": "DateCreated",
+            "SortOrder": "Descending",
+            "Limit": max(200, (num or 20) * 10),
             "Fields": "ProductionYear,Path,BackdropImageTags",
             "api_key": self._apikey,
         }
@@ -1570,7 +1647,7 @@ class Jellyfin:
             params.update(emby_query_params(query.with_fields(MediaServerField.PATH) if query is not None else None))
             res = self._request().get_res(url, params)
             if res:
-                result = res.json() or []
+                result = (res.json() or {}).get("Items") or []
                 ret_latest: list[_SchemaMediaServerPlayItem] = []
                 # 用户媒体库文件夹列表（排除黑名单）
                 library_folders = self.get_user_library_folders()
@@ -1609,9 +1686,9 @@ class Jellyfin:
                     )
                 return ret_latest
             else:
-                logger.error("Users/Items/Latest 未获取到返回数据")
+                logger.error("Users/Items 未获取到最新入库数据")
         except Exception as e:
-            logger.error("连接Users/Items/Latest出错：" + str(e))
+            logger.error("连接Users/Items出错：" + str(e))
         return None
 
     def get_user_library_folders(self) -> list[str]:

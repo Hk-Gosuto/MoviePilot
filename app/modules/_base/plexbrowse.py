@@ -5,10 +5,13 @@ Plex 媒体服务器浏览、详情、三层剧集、音轨字幕轨道与播放
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlencode
+from uuid import uuid4
 
+from app.adapters.network.http import RequestUtils
 from app.application.mediaserver import MediaServerIdentityHelper
+from app.application.playback import sanitize_client_header_value
 from app.foundation.url import UrlUtils
 from app.runtime.log import logger
 from app.schemas.mediaserver import (
@@ -19,6 +22,8 @@ from app.schemas.mediaserver import (
     MediaServerMediaSource,
     MediaServerMediaStream,
     MediaServerPerson,
+    MediaServerRatingItem,
+    MediaServerRatingSource,
 )
 from app.schemas.types import MediaType
 
@@ -87,6 +92,75 @@ def _plex_item_id(item: Any) -> str:
     return str(getattr(item, "key", "") or "")
 
 
+def _plex_critic_percent(item: Any) -> Optional[float]:
+    """
+    提取 Plex 条目中的烂番茄专业影评百分比（0 至 100）。
+
+    :param item: Plex SDK 条目对象
+    :return: 百分制评分，未提供时返回 None
+    """
+    for entry in getattr(item, "ratings", None) or []:
+        image = str(getattr(entry, "image", "") or "").casefold()
+        value = getattr(entry, "value", None)
+        if image.startswith("rottentomatoes://") and "upright" not in image and "spilled" not in image:
+            if isinstance(value, (int, float)) and value > 0:
+                return round(float(value) * 10.0 if value <= 10.0 else float(value), 0)
+    rating_image = str(getattr(item, "ratingImage", "") or "").casefold()
+    raw_rating = getattr(item, "rating", None)
+    if rating_image.startswith("rottentomatoes://") and isinstance(raw_rating, (int, float)) and raw_rating > 0:
+        return round(float(raw_rating) * 10.0 if raw_rating <= 10.0 else float(raw_rating), 0)
+    return None
+
+
+def _parse_single_plex_rating(entry: Any) -> Optional[MediaServerRatingItem]:
+    """
+    解析单条 Plex Rating 元素（兼容 imdb://、themoviedb:// 与 rottentomatoes://）。
+
+    :param entry: Plex Rating 对象
+    :return: 标准化评分项，无法识别时返回 None
+    """
+    image = str(getattr(entry, "image", "") or "").casefold()
+    value = getattr(entry, "value", None)
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    if image.startswith("imdb://"):
+        return MediaServerRatingItem(source="imdb", value=round(float(value), 1), scale="ten")
+    if image.startswith("themoviedb://"):
+        return MediaServerRatingItem(source="tmdb", value=round(float(value), 1), scale="ten")
+    if image.startswith("rottentomatoes://") and "upright" not in image and "spilled" not in image:
+        pct = round(float(value) * 10.0 if value <= 10.0 else float(value), 0)
+        return MediaServerRatingItem(source="rottentomatoes", value=pct, scale="percent")
+    return None
+
+
+def _build_plex_ratings(item: Any, guids: Mapping[str, Optional[str]]) -> list[MediaServerRatingItem]:
+    """
+    聚合 Plex 条目自带的多来源评分列表；缺少显式 Ratings 时从 rating / audienceRating 兜底推导。
+
+    :param item: Plex SDK 条目对象
+    :param guids: 解析后的外部标识字典
+    :return: 去重后的多来源评分列表
+    """
+    items: list[MediaServerRatingItem] = []
+    seen: set[str] = set()
+    for entry in getattr(item, "ratings", None) or []:
+        parsed = _parse_single_plex_rating(entry)
+        if parsed and parsed.source not in seen:
+            seen.add(parsed.source)
+            items.append(parsed)
+    if not items:
+        audience = getattr(item, "audienceRating", None) or getattr(item, "rating", None)
+        if isinstance(audience, (int, float)) and audience > 0:
+            fallback_src: MediaServerRatingSource = (
+                "imdb" if guids.get("imdb_id") else ("tmdb" if guids.get("tmdb_id") else "community")
+            )
+            items.append(MediaServerRatingItem(source=fallback_src, value=round(float(audience), 1), scale="ten"))
+        critic_pct = _plex_critic_percent(item)
+        if critic_pct and "rottentomatoes" not in seen:
+            items.append(MediaServerRatingItem(source="rottentomatoes", value=critic_pct, scale="percent"))
+    return items
+
+
 def _build_plex_browse_item(host: str, token: str, item: Any) -> Optional[MediaServerBrowseItem]:
     """
     将 Plex SDK 条目转换为统一 `MediaServerBrowseItem`。
@@ -138,6 +212,7 @@ def _build_plex_browse_item(host: str, token: str, item: Any) -> Optional[MediaS
         year=getattr(item, "year", None),
         premiere_date=premiere,
         rating=round(float(rating), 1) if isinstance(rating, (int, float)) else None,
+        critic_rating=_plex_critic_percent(item),
         duration_ms=int(duration_ms) if isinstance(duration_ms, (int, float)) and duration_ms > 0 else None,
         poster=poster,
         backdrop=art_url or still,
@@ -435,6 +510,7 @@ def plex_item_detail(
         season_count=getattr(item, "childCount", None) if base.item_type == "Series" else None,
         episode_count=getattr(item, "leafCount", None) if base.item_type in {"Series", "Season"} else None,
         media_sources=sources,
+        ratings=_build_plex_ratings(item, guids),
         play_url=play_url_builder(str(getattr(item, "key", "") or item_id)) if play_url_builder else None,
         can_play=base.item_type in {"Movie", "Episode", "Audio"} or bool(sources),
     )
@@ -533,6 +609,195 @@ def plex_subtitle_url(host: str, token: str, subtitle_id: str) -> Optional[str]:
     return f"{host.rstrip('/')}/library/streams/{stream_id}?{urlencode({'X-Plex-Token': token})}"
 
 
+# Plex 自动标已看兜底阈值（90%）
+_PLEX_SCROBBLE_RATIO = 0.9
+
+
+def plex_normalize_rating_key(item_id: str) -> tuple[str, str]:
+    """
+    将 Plex 数字 ID 或 `/library/metadata/{id}` 路径统一拆分为 `(ratingKey, metadataKey)`。
+
+    :param item_id: 原始 Plex 条目标识
+    :return: `(rating_key, metadata_key)` 二元组
+    """
+    raw = str(item_id or "").strip()
+    if raw.startswith("/library/metadata/"):
+        rating_key = raw.removeprefix("/library/metadata/").strip("/").split("/", 1)[0]
+        return rating_key, f"/library/metadata/{rating_key}"
+    rating_key = raw.strip("/")
+    return rating_key, f"/library/metadata/{rating_key}"
+
+
+def plex_build_session_headers(
+    token: str,
+    *,
+    client_id: Optional[str] = None,
+    play_session_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    platform: Optional[str] = None,
+    app_version: Optional[str] = None,
+) -> dict[str, str]:
+    """
+    为单次 Plex 播放会话构造完整客户端身份请求头，避免复用全局 `PlexAPI` 身份导致并发互覆盖。
+
+    :param token: 本次播放使用的 Plex 访问令牌
+    :param client_id: 客户端匿名稳定设备标识
+    :param play_session_id: 本次播放唯一会话标识
+    :param device_name: 客户端设备展示名
+    :param platform: 客户端平台名（iOS / Android / HarmonyOS / Web）
+    :param app_version: 客户端版本号
+    :return: 完整 `X-Plex-*` 请求头字典
+    """
+    safe_client = sanitize_client_header_value(client_id, "moviepilot-client")
+    safe_session = sanitize_client_header_value(play_session_id, uuid4().hex)
+    safe_platform = sanitize_client_header_value(platform, "Mobile", max_len=32)
+    safe_device = sanitize_client_header_value(device_name, safe_platform)
+    safe_version = sanitize_client_header_value(app_version, "2.0.3", max_len=32)
+    display_device = safe_device if safe_device.startswith("MoviePilot") else f"MoviePilot ({safe_device})"
+    return {
+        "X-Plex-Token": sanitize_client_header_value(token, "", max_len=512),
+        "X-Plex-Client-Identifier": safe_client,
+        "X-Plex-Session-Identifier": safe_session,
+        "X-Plex-Product": "MoviePilot",
+        "X-Plex-Version": safe_version,
+        "X-Plex-Platform": safe_platform,
+        "X-Plex-Device": safe_device,
+        "X-Plex-Device-Name": display_device,
+        "Accept": "application/json",
+    }
+
+
+def plex_prepare_playback_session(
+    token: str,
+    *,
+    media_source_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    platform: Optional[str] = None,
+    app_version: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    为 Plex 起播生成独立 `X-Plex-Session-Identifier` 与同源拉流关联头。
+
+    :param token: 本次播放使用的 Plex 访问令牌
+    :param media_source_id: 可选多版本 MediaPart 标识
+    :param client_id: 客户端匿名稳定设备标识
+    :param device_name: 客户端设备名称
+    :param platform: 客户端平台标识
+    :param app_version: 客户端版本号
+    :return: 包含 `play_session_id`、`media_source_id`、`stream_headers` 与 `sync_mode="session"` 的字典
+    """
+    session_id = uuid4().hex
+    headers = (
+        plex_build_session_headers(
+            token,
+            client_id=client_id,
+            play_session_id=session_id,
+            device_name=device_name,
+            platform=platform,
+            app_version=app_version,
+        )
+        if token
+        else {}
+    )
+    return {
+        "play_session_id": session_id,
+        "media_source_id": media_source_id,
+        "stream_headers": headers,
+        "sync_mode": "session",
+    }
+
+
+def plex_report_progress_detail(
+    host: str,
+    token: str,
+    item_id: str,
+    position_ms: int,
+    *,
+    duration_ms: Optional[int] = None,
+    is_paused: bool = False,
+    state: str = "playing",
+    play_session_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    platform: Optional[str] = None,
+    app_version: Optional[str] = None,
+    playback_time_ms: Optional[int] = None,
+    scrobbled: bool = False,
+    request_factory: Callable[[dict[str, str]], RequestUtils] = lambda headers: RequestUtils(headers=headers, timeout=10),
+) -> dict[str, Any]:
+    """
+    直调 Plex `GET /:/timeline` 上报实时播放会话状态，并在完播停止时按需补发 `/:/scrobble`。
+
+    相比 `python-plexapi` 的 `fetchItem().updateTimeline()`，本实现省去每次心跳的额外元数据查询，
+    并按客户端设备与会话隔离 `X-Plex-Client-Identifier` / `X-Plex-Session-Identifier`。
+
+    :return: 包含 `reported`、`mode="session"`、`started_sent`、`scrobbled`、`token_invalid` 的结构化回执
+    """
+    if not host or not token or not item_id:
+        return {"reported": False, "mode": "unsupported", "started_sent": False, "scrobbled": scrobbled}
+    rating_key, metadata_key = plex_normalize_rating_key(item_id)
+    if not rating_key:
+        return {"reported": False, "mode": "unsupported", "started_sent": False, "scrobbled": scrobbled}
+
+    plex_state = "stopped" if state == "stopped" else ("paused" if (is_paused or state == "paused") else "playing")
+    headers = plex_build_session_headers(
+        token,
+        client_id=client_id,
+        play_session_id=play_session_id,
+        device_name=device_name,
+        platform=platform,
+        app_version=app_version,
+    )
+    params: dict[str, Any] = {
+        "ratingKey": rating_key,
+        "key": metadata_key,
+        "state": plex_state,
+        "time": max(0, int(position_ms)),
+        "hasMDE": 1,
+        "continuing": 1,
+    }
+    if duration_ms and duration_ms > 0:
+        params["duration"] = int(duration_ms)
+    if playback_time_ms is not None and playback_time_ms >= 0:
+        params["playbackTime"] = int(playback_time_ms)
+
+    base = host.rstrip("/")
+    try:
+        http = request_factory(headers)
+        res = http.get_res(f"{base}/:/timeline", params=params)
+        if res is None:
+            return {"reported": False, "mode": "session", "started_sent": False, "scrobbled": scrobbled, "token_invalid": False}
+        if res.status_code == 401:
+            return {"reported": False, "mode": "session", "started_sent": False, "scrobbled": scrobbled, "token_invalid": True}
+        ok = res.status_code in {200, 204}
+        did_scrobble = scrobbled
+        if (
+            ok
+            and plex_state == "stopped"
+            and not scrobbled
+            and duration_ms
+            and duration_ms > 0
+            and (position_ms / duration_ms) >= _PLEX_SCROBBLE_RATIO
+        ):
+            scrobble_res = http.get_res(
+                f"{base}/:/scrobble",
+                params={"identifier": "com.plexapp.plugins.library", "key": rating_key},
+            )
+            if scrobble_res and scrobble_res.status_code in {200, 204}:
+                did_scrobble = True
+        return {
+            "reported": ok,
+            "mode": "session",
+            "started_sent": ok and plex_state == "playing",
+            "scrobbled": did_scrobble,
+            "token_invalid": False,
+        }
+    except Exception as err:
+        logger.debug(f"直调 Plex timeline 回传播放进度失败：{err}")
+        return {"reported": False, "mode": "session", "started_sent": False, "scrobbled": scrobbled, "token_invalid": False}
+
+
 def plex_report_progress(
     plex: Any,
     item_id: str,
@@ -543,7 +808,7 @@ def plex_report_progress(
     state: str = "playing",
 ) -> bool:
     """
-    将客户端播放进度回传给 Plex 服务器。
+    将客户端播放进度回传给 Plex 服务器的兼容入口（保留供直接传 SDK 对象的旧调用方使用）。
 
     :param plex: PlexServer 实例
     :param item_id: 条目标识

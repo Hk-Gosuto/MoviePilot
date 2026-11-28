@@ -29,13 +29,17 @@ from app.domain.metainfo import MetaInfo
 from app.foundation import text as text_tools
 from app.foundation.crypto import HashUtils
 from app.foundation.url import UrlUtils
-from app.runtime.cache import FileCache, TTLCache
+from app.runtime.cache import AsyncTTLCache, FileCache, TTLCache
 from app.runtime.log import logger
 from app.schemas.exception import RateLimitExceededException
 from app.schemas.media import resolve_media_identity
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
 
 _SIZE_UNIT = 1024 * 1024
+# 同步拦截与人工异步放行共用缓存区域、容量和以秒计的有效期。
+_INVALID_TORRENT_REGION = "invalid_torrents"
+_INVALID_TORRENT_MAXSIZE = 128
+_INVALID_TORRENT_TTL = 24 * 3600
 
 def _is_transient_torrent_status(status: int) -> bool:
     """
@@ -60,6 +64,12 @@ class TorrentResponsePort(Protocol):
     content: bytes
     text: str
     reason: str
+
+
+class TorrentRequestError(RuntimeError):
+    """
+    种子传输端口返回的安全网络诊断，不包含下载地址、Cookie 或代理凭据。
+    """
 
 
 def _torrent_magnet_link(response: Optional[TorrentResponsePort], url: str) -> Optional[str]:
@@ -130,6 +140,7 @@ class TorrentHttpPort(Protocol):
         :param allow_redirects: 是否跟随 HTTP 重定向，默认允许
         :param data: POST 表单字段；None 表示无表单数据
         :return: 供种子解析使用的响应；请求失败且没有响应时为 None
+        :raises TorrentRequestError: 传输失败，错误文本仅包含可向用户展示的网络故障类别
         """
 
 
@@ -233,16 +244,20 @@ def _cache_valid_torrent_content(
 def _text_filter_failure(torrent: TorrentInfo, params: Dict[str, Any], content: str) -> Optional[Tuple[str, str]]:
     """
     按原有顺序检查包含、排除、质量等正则，并返回业务原因和运行诊断。
+
+    质量、分辨率、特效会先将界面短标签规范化为等价正则，兼容存量短标签与第三方调用。
     """
     for key, label, subject, expected in (
         ("include", "包含", content, True), ("exclude", "排除", content, False),
         ("quality", "质量", torrent.title, True), ("resolution", "分辨率", torrent.title, True),
         ("effect", "特效", torrent.title, True),
     ):
-        pattern = params.get(key)
-        if isinstance(pattern, str) and pattern and _filter_pattern_search(pattern, subject or "") != expected:
-            diagnostic = f"{subject} {'不匹配' if expected else '匹配'}{label}规则 {pattern}"
-            return f"不符合{label}条件：{pattern}", diagnostic
+        raw_pattern = params.get(key)
+        if isinstance(raw_pattern, str) and raw_pattern:
+            pattern = torrent_rules.resolve_runtime_filter_pattern(key, raw_pattern) or raw_pattern
+            if _filter_pattern_search(pattern, subject or "") != expected:
+                diagnostic = f"{subject} {'不匹配' if expected else '匹配'}{label}规则 {pattern}"
+                return f"不符合{label}条件：{raw_pattern}", diagnostic
     return None
 
 
@@ -314,7 +329,8 @@ class TorrentHelper:
         """
         初始化种子失败地址缓存
         """
-        self._invalid_torrents = TTLCache(region="invalid_torrents", maxsize=128, ttl=3600 * 24)
+        self._invalid_torrents = TTLCache(region=_INVALID_TORRENT_REGION,
+                                         maxsize=_INVALID_TORRENT_MAXSIZE, ttl=_INVALID_TORRENT_TTL)
 
     @staticmethod
     def _request_torrent(http_port: TorrentHttpPort, site: Mapping[str, Any],
@@ -334,9 +350,15 @@ class TorrentHelper:
         普通种子 GET 瞬时失败时退避 1、2 秒；签名换票和确认 POST 不在此重试。
         """
         for attempt in range(3 if retry else 1):
-            response = self._request_torrent(http_port, site, method="GET", **request_options)
-            if not retry or attempt == 2 or not self._should_retry_torrent_response(response):
-                return response
+            try:
+                response = self._request_torrent(http_port, site, method="GET", **request_options)
+            except TorrentRequestError:
+                # 最终一次向上交还原诊断；中间失败仍沿用既有瞬时重试预算。
+                if not retry or attempt == 2:
+                    raise
+            else:
+                if not retry or attempt == 2 or not self._should_retry_torrent_response(response):
+                    return response
             logger.warning(f"种子下载遇到瞬时失败，将进行第 {attempt + 1} 次重试")
             time.sleep(attempt + 1)
         return None
@@ -488,7 +510,7 @@ class TorrentHelper:
                 http_port, url=url, cookie=cookie, ua=ua, referer=referer,
                 proxies=config.proxy if proxy else None, retry=retry, site=site,
             )
-        except (ValueError, RateLimitExceededException) as err:
+        except (ValueError, RateLimitExceededException, TorrentRequestError) as err:
             return cache_path, None, "", [], str(err)
         if magnet := _torrent_magnet_link(req, url):
             return cache_path if req is not None else None, magnet, "", [], "获取到磁力链接"
@@ -517,7 +539,7 @@ class TorrentHelper:
                         http_port, site=site, method="POST", url=action, cookie=cookie, ua=ua,
                         referer=url, proxies=config.proxy if proxy else None, data=data, retry=retry,
                     )
-                except (ValueError, RateLimitExceededException) as err:
+                except (ValueError, RateLimitExceededException, TorrentRequestError) as err:
                     return cache_path, None, "", [], str(err)
                 if magnet := _torrent_magnet_link(req, url):
                     return cache_path if req is not None else None, magnet, "", [], "获取到磁力链接"
@@ -771,6 +793,17 @@ class TorrentHelper:
         """
         if url not in self._invalid_torrents:
             self._invalid_torrents[url] = True
+
+    async def async_remove_invalid(self, url: Optional[str]) -> None:
+        """
+        人工确认资源后清除该下载地址的无效标记，其他地址的保护继续生效。
+
+        :param url: 本次人工操作对应的原始下载地址；为空或未被标记时不修改缓存
+        """
+        if url:
+            cache = AsyncTTLCache(region=_INVALID_TORRENT_REGION,
+                                  maxsize=_INVALID_TORRENT_MAXSIZE, ttl=_INVALID_TORRENT_TTL)
+            await cache.pop(url, False)
 
     @staticmethod
     def match_torrent(

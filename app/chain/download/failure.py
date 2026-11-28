@@ -14,6 +14,7 @@ from app.application.download.failures import (
     DownloadFailureSnapshot,
     DownloadFailureWrite,
 )
+from app.application.torrent.download import TorrentHelper
 from app.chain.download.contract import _DownloadOwnerBase
 from app.domain import episode as episode_rules
 from app.domain import torrent as torrent_rules
@@ -52,6 +53,23 @@ class DownloadFailureOwner(_DownloadOwnerBase):
     """
     下载资源级失败与退避指纹、冷却和持久化 owner。
     """
+
+    async def async_clear_download_failure(self, contexts: List[Context]) -> None:
+        """
+        异步清除人工确认资源的失败台账和无效地址缓存，不清除重复提交的保护记录。
+
+        失败台账提交成功后才清除地址缓存。任何一步失败均向调用方报告，不把未完成的重试放行说成成功。
+
+        :param contexts: 操作前后同一资源的上下文；不接受按媒体或站点批量清除
+        """
+        fingerprints = list(dict.fromkeys(fingerprint for context in contexts
+                                         if (fingerprint := self._build_download_failure_fingerprint(context))))
+        if fingerprints:
+            await self.download_failure_repository.async_delete_by_fingerprints(fingerprints)
+        helper = TorrentHelper()
+        for context in contexts:
+            if context.torrent_info is not None:
+                await helper.async_remove_invalid(context.torrent_info.enclosure)
 
     @staticmethod
     def _is_subscribe_source(source: Optional[str]) -> bool:
@@ -236,12 +254,13 @@ class DownloadFailureOwner(_DownloadOwnerBase):
         return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _download_failure_ttl(error_msg: Optional[str]) -> int:
+    def _download_failure_ttl(error_msg: Optional[str], *, episode_probe: bool = False) -> int:
         """
         限流按站点窗口冷却；已有任务的拒绝按原因区分资源级与瞬时冷却；换票、临时地址和泛化空内容
         失败使用瞬时冷却。
 
         :param error_msg: 准备或下载器提交阶段保留的具体失败原因
+        :param episode_probe: 是否为仅核对集数的读取；一次无效响应只按瞬时失败处理
         :return: 冷却秒数；换票诊断中的 404 等关键字不能升级为资源失效
         """
         rate_limit_ttl = torrent_rules.rate_limit_cooldown(error_msg)
@@ -255,7 +274,8 @@ class DownloadFailureOwner(_DownloadOwnerBase):
                 return DOWNLOAD_FAILURE_RESOURCE_TTL_SECONDS
             return DOWNLOAD_FAILURE_TRANSIENT_TTL_SECONDS
         error_text = str(error_msg or "").lower()
-        if error_text.startswith(("换票失败：", "临时下载地址失效：")):
+        if (error_text.startswith(("换票失败：", "临时下载地址失效："))
+                or (episode_probe and error_text.startswith("种子数据有误"))):
             return DOWNLOAD_FAILURE_TRANSIENT_TTL_SECONDS
         if any(keyword in error_text for keyword in DOWNLOAD_FAILURE_RESOURCE_ERROR_KEYWORDS):
             return DOWNLOAD_FAILURE_RESOURCE_TTL_SECONDS
