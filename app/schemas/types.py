@@ -426,6 +426,12 @@ class SystemConfigKey(Enum):
     Downloaders = "Downloaders"
     # 媒体服务器配置
     MediaServers = "MediaServers"
+    # 用户级媒体服务器播放与会话同步的内部加密凭据；按用户名与服务器名隔离，不向客户端下发
+    MediaServerUserCredentials = "MediaServerUserCredentials"
+    # 自定义弹弹play 兼容弹幕服务配置与缓存策略；包含加密上游凭据，不向普通用户下发
+    DanmakuConfig = "DanmakuConfig"
+    # 媒体条目与弹幕剧集的手动纠偏绑定与时间偏移映射
+    DanmakuBindings = "DanmakuBindings"
     # 消息通知配置
     Notifications = "Notifications"
     # App 中心推送自动接入的内部凭据状态；按服务地址隔离，不通过通知渠道配置下发
@@ -615,6 +621,47 @@ class NotificationChannel(Enum):
     AppPush = "AppPush"
     # QQ 消息渠道
     QQ = "QQ"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Optional["NotificationChannel"]:
+        """
+        解析带命名空间的扩展值而不缓存；格式合法不代表平台注册或入口可信。
+        """
+        if not isinstance(value, str) or re.fullmatch(r"platform:[a-z][a-z0-9._-]{0,54}", value) is None:
+            return None
+        member = object.__new__(cls)
+        member._name_ = value
+        member._value_ = value
+        return member
+
+    def __eq__(self, other: object) -> bool:
+        """
+        同类枚举按传输值比较，保证无缓存扩展在入站核对和序列化后仍相等。
+        """
+        if isinstance(other, NotificationChannel):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        """
+        保持内置枚举的名称哈希，并让同值扩展可稳定用于集合和字典。
+        """
+        return hash(self._name_)
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler,
+    ) -> dict[str, object]:
+        """
+        保留全部内置值并公开扩展格式，枚举成员不能被误当作授权白名单。
+        """
+        schema: dict[str, object] = handler(core_schema)
+        values = schema.pop("enum", [member.value for member in cls])
+        schema["anyOf"] = [
+            {"type": "string", "enum": values},
+            {"type": "string", "pattern": r"^platform:[a-z][a-z0-9._-]{0,54}$"},
+        ]
+        return schema
 
 
 class NotificationAction(str, Enum):

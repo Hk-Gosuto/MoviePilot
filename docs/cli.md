@@ -295,6 +295,14 @@ moviepilot setup --config-dir /path/to/moviepilot-config
 - 媒体服务器
 - 消息通知渠道
 
+内置目录保留官方模型服务、云平台，以及 OpenRouter、OpenCode 等知名聚合服务。
+Fireworks AI、Hugging Face、Meta Llama、Amazon Nova、Poe 等平台均作为正式提供商，
+可在设置页和安装向导中直接选择。
+需要接入自建网关或其他兼容服务时，按协议选择「OpenAI 兼容」
+（`LLM_PROVIDER=openai`）或「Anthropic 兼容」（`LLM_PROVIDER=anthropic-compatible`），
+填写模型 ID、API Key 和 Base URL。models.dev 只提供模型元数据，
+不会自动向提供商目录添加站点。
+
 `LLM_TEMPERATURE` 为可选配置，默认留空。设置页留空或清空配置后，LLM 请求不发送
 `temperature`，使用模型服务默认值；Google 原生运行时使用 SDK 的模型默认温度。
 显式填写 `0`、`1` 等数值仍按填写值发送。

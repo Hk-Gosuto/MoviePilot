@@ -30,6 +30,19 @@
 Server 使用独立 SQL 表长期保存关系，不属于识别缓存清理范围。公共上报只补缺，
 管理后台可纠正目标或撤销错误关系；撤销保留记录，防止旧实例覆盖。实例正缓存最多一小时后更新。
 
+### 种子重新识别与下载失败重试
+
+管理员调用 `torrent.cache.reidentify`（`POST /api/v1/torrent/cache/reidentify/{domain}/{torrent_hash}`）
+成功识别并保存媒体身份后，会清除该资源在修正前后身份下的自动下载失败冷却和原下载地址的无效标记。
+该操作不会主动提交下载；随后可重新触发订阅搜索或手动下载，以重新检查链接。其他资源、下载器重复提交保护
+和站点限流不受影响。识别无结果、缓存保存失败或清理事务失败时，不清除失败保护；清理失败会明确返回失败。
+
+智能订阅搜索中，同一目标已收集的合格候选全部处于下载冷却时，本轮不再为该目标继续深翻。
+缺集仍然保留，其他目标继续搜索；新页发现该目标的替代资源时重新参与择源。完整搜索保持深页查找策略。
+本轮正常结束后，`subscription.execution.get` / `subscription.execution.list` 返回终态与实际提交计数，
+并在现有 `error` 摘要中保留资源冷却原因和最早可重试时间，避免把资源冷却显示为等待站点配额。
+种子网络请求会保留 HTTP 状态，超时、代理、TLS 和连接故障以不含 URL 凭据的类别反馈。
+
 ### 外部整理历史登记
 
 管理员可通过 `transfer.history.register`（`POST /api/v1/history/transfer`）登记已经完成的
@@ -197,8 +210,10 @@ Agent/MCP 网关要求更新对象非空，且拒绝把 `***` 等宿主脱敏占
   `submission_type`（`initial` / `upgrade`）、`best_version_full` 及两类集数。
   活动可从订阅历史继续查看，恢复重试按资源去重，不重复累计成功回执。
 - `GET /api/v1/subscribe/execution/batches` 及其 `/{batch_id}` 详情返回 `download_counts`、
-  `downloads` 和 `downloads_omitted`。分类数量按成功下载任务计数，与搜索任务完成数量独立；
-  明细最多 100 条，裁剪不影响总量，访问权限沿用整批订阅归属校验。
+  `downloads` 和 `downloads_omitted`，并在各搜索任务快照中提供 `rejected_count` 与
+  `rejection_reasons` 以区分“站点无相关资源”与“候选资源被分辨率/质量/规则过滤”。
+  分类数量按成功下载任务计数，与搜索任务完成数量独立；明细最多 100 条，裁剪不影响总量，
+  访问权限沿用整批订阅归属校验。
 - 下载历史的 `note.subscription_download` 保留同一来源，`note.source` 继续保留原入口信息。
   下载处理上下文在持久事件恢复后保留该来源，已冻结的通知保持模板渲染结果。
 
@@ -312,7 +327,7 @@ Web 影视精确与标题 SSE 的 `manual_paging=true` 模式在最终 `done` �
 ### App 小组件只读接口
 
 主 App 使用既有登录通过 `/api/v1/widget/context` 核对账号、`/api/v1/widget/registrations` 登记。
-扩展使用独立的有限期只读 Bearer 通过 `/api/v1/widget/snapshot` 刷新。
+扩展使用独立的有限期只读 Bearer 通过 `/api/v1/widget/snapshot` 刷新主体快照，超级管理员还可通过 `/api/v1/widget/plugins` 与 `/api/v1/widget/plugins/{plugin_id}` 只读刷新插件桌面小组件。
 该凭据不适用于普通 REST/MCP，小组件接口也不加入 Agent 工具目录；
 详见[授权、权限与快照协议](widgets.md)。主登录凭据不得交给系统扩展。
 
